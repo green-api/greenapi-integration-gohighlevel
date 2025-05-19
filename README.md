@@ -1,21 +1,26 @@
-# GREEN-API Integration with GoHighLevel
+# [GREEN-API](https://green-api.com/en) Integration with [GoHighLevel](https://www.gohighlevel.com)
 
-This integration enables WhatsApp communication within GoHighLevel (GHL) using the GREEN-API platform. Built on
-the [Universal Integration Platform](https://github.com/green-api/greenapi-integration) by GREEN-API, it consists of a
+This integration enables WhatsApp communication within [GoHighLevel](https://www.gohighlevel.com) (GHL) using
+the [GREEN-API](https://green-api.com/en) platform. Built on
+the [Universal Integration Platform](https://github.com/green-api/greenapi-integration)
+by [GREEN-API](https://green-api.com/en), it consists of a
 NestJS adapter service that bridges the connection between the two platforms.
 
-**Important:** This integration is designed exclusively for GoHighLevel **sub-accounts**. Attempting to install or use
+**Important:** This integration is designed exclusively for [GoHighLevel](https://www.gohighlevel.com) **sub-accounts**.
+Attempting to install or use
 it at an agency level, or selecting "Agency" during app configuration, may lead to incorrect behavior or functionality
 issues.
 
 ## Overview
 
-This documentation guides you through setting up your own integration between GREEN-API and GoHighLevel. Rather than
+This documentation guides you through setting up your own integration between [GREEN-API](https://green-api.com/en)
+and [GoHighLevel](https://www.gohighlevel.com). Rather than
 using a pre-existing app, you will:
 
-1. Create your own GoHighLevel Marketplace app
+1. Create your own [GoHighLevel](https://www.gohighlevel.com) Marketplace app
 2. Configure and deploy the adapter service
-3. Link your GREEN-API instance with your GoHighLevel sub-account
+3. Link your [GREEN-API](https://green-api.com/en) instance with your [GoHighLevel](https://www.gohighlevel.com)
+   sub-account
 
 ## Architecture
 
@@ -23,24 +28,26 @@ using a pre-existing app, you will:
 
 The NestJS application that:
 
-- Handles message mapping between GoHighLevel and WhatsApp
-- Manages GoHighLevel OAuth authentication and token management for sub-accounts
-- Provides webhook endpoints for both GoHighLevel and GREEN-API
-- Creates and manages contacts from WhatsApp in GoHighLevel
+- Handles message mapping between [GoHighLevel](https://www.gohighlevel.com) and WhatsApp
+- Manages [GoHighLevel](https://www.gohighlevel.com) OAuth authentication and token management for sub-accounts
+- Provides webhook endpoints for both [GoHighLevel](https://www.gohighlevel.com)
+  and [GREEN-API](https://green-api.com/en)
+- Creates and manages contacts from WhatsApp in [GoHighLevel](https://www.gohighlevel.com)
 
 ## Prerequisites
 
 - MySQL database (5.7 or higher)
 - Node.js 20 or higher
-- GREEN-API account and instance
-- A GoHighLevel **Developer Account**. You can create one
+- [GREEN-API](https://green-api.com/en) account and instance
+- A [GoHighLevel](https://www.gohighlevel.com) **Developer Account**. You can create one
   at [https://marketplace.gohighlevel.com/](https://marketplace.gohighlevel.com/)
-- A GoHighLevel **Sub-Account** for testing the app installation and functionality
+- A [GoHighLevel](https://www.gohighlevel.com) **Sub-Account** for testing the app installation and functionality
 - A publicly accessible URL for the adapter service (for webhooks)
 
-## Step 1: Setting Up the GoHighLevel Marketplace App
+## Step 1: Setting Up the [GoHighLevel](https://www.gohighlevel.com) Marketplace App
 
-Before deploying the adapter service, you need to create and configure a GoHighLevel Marketplace app:
+Before deploying the adapter service, you need to create and configure a [GoHighLevel](https://www.gohighlevel.com)
+Marketplace app:
 
 1. **Register and log in** at [https://marketplace.gohighlevel.com/](https://marketplace.gohighlevel.com/)
 
@@ -76,7 +83,7 @@ Before deploying the adapter service, you need to create and configure a GoHighL
 
 7. **Create a Conversation Provider:**
     - Navigate to "Conversation Provider" in the app settings
-    - Name: "GREEN-API" (or any name you prefer)
+    - Name: "[GREEN-API](https://green-api.com/en)" (or any name you prefer)
     - Type: **SMS**
     - Delivery URL: `YOUR_APP_URL/webhooks/ghl` (same as webhook URL)
     - Check both "Is this a Custom Conversation Provider?" and "Always show this Conversation Provider?"
@@ -212,20 +219,21 @@ environment and requirements.
 
 ## Step 4: Installing and Using the Integration
 
-Once your GoHighLevel app is configured and your adapter service is deployed, you can install and use the integration:
+Once your [GoHighLevel](https://www.gohighlevel.com) app is configured and your adapter service is deployed, you can
+install and use the integration:
 
-1. **Install the app in your GoHighLevel sub-account:**
+1. **Install the app in your [GoHighLevel](https://www.gohighlevel.com) sub-account:**
     - If your app is private:
         - Copy your app's ID from marketplace.gohighlevel.com
-        - From your GoHighLevel sub-account, navigate to the marketplace
+        - From your [GoHighLevel](https://www.gohighlevel.com) sub-account, navigate to the marketplace
         - Click on any app and modify the URL by replacing the app ID portion with your app's ID
     - Click "Install" on your app's page and then "Allow and Install"
 
-2. **Complete the GREEN-API authentication:**
+2. **Complete the [GREEN-API](https://green-api.com/en) authentication:**
     - After OAuth authorization, you can close the page you were redirected to and return back to the previous page,
-      you'll be prompted to enter your GREEN-API credentials
-    - Enter your GREEN-API Instance ID and API Token (from console.green-api.com)
-    - The system will verify and link your GREEN-API instance to your GHL account
+      you'll be prompted to enter your [GREEN-API](https://green-api.com/en) credentials
+    - Enter your [GREEN-API](https://green-api.com/en) Instance ID and API Token (from console.green-api.com)
+    - The system will verify and link your [GREEN-API](https://green-api.com/en) instance to your GHL account
 
 ## How the Integration Works
 
@@ -234,7 +242,7 @@ Once installed, the integration works automatically:
 ### Incoming Messages (WhatsApp → GHL)
 
 1. When a customer sends a message to your WhatsApp number:
-    - GREEN-API receives the message and sends it to your adapter
+    - [GREEN-API](https://green-api.com/en) receives the message and sends it to your adapter
     - The adapter creates or updates the contact in GHL
     - The message appears in GHL's conversation interface
 
@@ -249,7 +257,8 @@ Once installed, the integration works automatically:
 
 1. To reply to a WhatsApp contact:
     - Use GHL's standard messaging interface
-    - The message will be routed through your adapter to GREEN-API and delivered via WhatsApp
+    - The message will be routed through your adapter to [GREEN-API](https://green-api.com/en) and delivered via
+      WhatsApp
 
 2. Supported outgoing message types:
     - Text messages
@@ -260,7 +269,7 @@ Once installed, the integration works automatically:
 ### Common Issues
 
 1. **Messages not being delivered:**
-    - Verify your GREEN-API instance is authorized
+    - Verify your [GREEN-API](https://green-api.com/en) instance is authorized
     - Check adapter logs for any errors
     - Ensure webhook URLs are correctly configured
 
