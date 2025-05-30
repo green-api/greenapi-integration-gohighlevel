@@ -204,7 +204,6 @@ export class GhlService extends BaseAdapter<
 					locationId: ghlUserId,
 					contactId,
 					limit: 1,
-					lastMessageType: "TYPE_CUSTOM_PROVIDER_SMS",
 				},
 			});
 			if (search.conversations?.length > 0) {

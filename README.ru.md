@@ -1,6 +1,6 @@
 # Интеграция [GREEN-API](https://green-api.com) для [GoHighLevel](https://www.gohighlevel.com)
 
-Эта интеграция обеспечивает взаимодействие с WhatsApp в [GoHighLevel](https://www.gohighlevel.com) (GHL) через
+Данная интеграция обеспечивает взаимодействие с WhatsApp в [GoHighLevel](https://www.gohighlevel.com) (GHL) через
 платформу [GREEN-API](https://green-api.com). Разработана на
 базе [Universal Integration Platform](https://github.com/green-api/greenapi-integration)
 от [GREEN-API](https://green-api.com) и состоит из
