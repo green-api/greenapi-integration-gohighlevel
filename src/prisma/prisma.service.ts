@@ -102,7 +102,7 @@ export class PrismaService
 		};
 
 		return this.instance.upsert({
-			where: {idInstance},
+			where: {userId: ghlLocationId},
 			create: createData,
 			update: updateData,
 		});
