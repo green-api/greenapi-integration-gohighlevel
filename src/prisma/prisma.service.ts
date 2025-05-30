@@ -93,6 +93,7 @@ export class PrismaService
 		};
 
 		const updateData = {
+			idInstance,
 			apiTokenInstance: instanceData.apiTokenInstance,
 			...(stateInstance && {stateInstance}),
 			...(instanceData.settings && {settings: instanceData.settings}),
