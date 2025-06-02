@@ -154,6 +154,39 @@ export class GhlTransformer
 				timestamp: new Date(webhook.timestamp * 1000),
 			};
 		}
+
+		if (webhook.typeWebhook === "incomingCall") {
+			const callerPhone = webhook.from?.replace("@c.us", "") || "unknown";
+			const callStatus = webhook.status;
+			switch (callStatus) {
+				case "offer":
+					messageText = `📞 Incoming call from ${callerPhone}`;
+					break;
+				case "pickUp":
+					messageText = `📞 Call answered from ${callerPhone}`;
+					break;
+				case "hangUp":
+					messageText = `📞 Call ended by recipient - ${callerPhone} (hung up or do not disturb)`;
+					break;
+				case "missed":
+					messageText = `📞 Missed call from ${callerPhone} (caller ended call)`;
+					break;
+				case "declined":
+					messageText = `📞 Call declined from ${callerPhone} (timeout)`;
+					break;
+				default:
+					messageText = `📞 Call event from ${callerPhone} - Status: ${callStatus}`;
+			}
+
+			return {
+				contactId: "placeholder_ghl_contact_id",
+				locationId: "placeholder_ghl_location_id",
+				message: messageText,
+				direction: "inbound",
+				timestamp: new Date(webhook.timestamp * 1000),
+			};
+		}
+
 		this.logger.error(`Cannot transform unsupported Green API webhook type: ${webhook.typeWebhook}`);
 		return {
 			contactId: "error_contact_id",
@@ -175,20 +208,18 @@ export class GhlTransformer
 					chatId: formatPhoneNumber(ghlWebhook.phone),
 					file: {
 						url: attachmentUrl,
-						fileName: `file_from_ghl_${Date.now()}_${ghlWebhook.messageId || "unknown"}`.replace(/[^a-zA-Z0-9_.-]/g, "_"),
+						fileName: `${Date.now()}_${ghlWebhook.messageId || "unknown"}`.replace(/[^a-zA-Z0-9_.-]/g, "_"),
 					},
 					caption: ghlWebhook.message || "",
 				};
-			}
-			else if (ghlWebhook.message) {
+			} else if (ghlWebhook.message) {
 				this.logger.debug(`GHL webhook has a text message. Processing as text. Message: "${ghlWebhook.message}"`);
 				return {
 					type: "text",
 					chatId: formatPhoneNumber(ghlWebhook.phone),
 					message: ghlWebhook.message,
 				};
-			}
-			else {
+			} else {
 				this.logger.warn(`GHL SMS webhook for ${ghlWebhook.phone} has no text content and no attachments. Ignoring.`);
 				throw new Error(`GHL SMS webhook has no message content or attachments for ${ghlWebhook.phone}`);
 			}

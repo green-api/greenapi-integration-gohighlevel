@@ -27,7 +27,7 @@ export class WebhooksController {
 		this.logger.debug(`Green API Webhook Body: ${JSON.stringify(webhook)}`);
 		res.status(HttpStatus.OK).send();
 		try {
-			await this.ghlService.handleGreenApiWebhook(webhook, ["incomingMessageReceived", "stateInstanceChanged"]);
+			await this.ghlService.handleGreenApiWebhook(webhook, ["incomingMessageReceived", "stateInstanceChanged", "incomingCall"]);
 		} catch (error) {
 			this.logger.error(`Error processing Green API webhook`, error);
 		}
