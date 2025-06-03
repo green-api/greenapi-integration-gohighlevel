@@ -374,6 +374,23 @@ export class GhlService extends BaseAdapter<
 				transformedMsg.locationId = instanceWithUser.userId;
 
 				await this.sendToPlatform(transformedMsg, instanceWithUser);
+			} else if (webhook.typeWebhook === "incomingCall") {
+				const callerPhoneRaw = webhook.from;
+				const normalizedPhone = callerPhoneRaw.split("@")[0];
+				const callerName = `WhatsApp ${normalizedPhone}`;
+
+				const ghlContact = await this.findOrCreateGhlContact(
+					instanceWithUser.userId,
+					normalizedPhone,
+					callerName,
+				);
+				if (!ghlContact.id) throw new IntegrationError("Failed to resolve GHL contact for call.", "GHL_API_ERROR");
+
+				const transformedCallMsg = this.ghlTransformer.toPlatformMessage(webhook);
+				transformedCallMsg.contactId = ghlContact.id;
+				transformedCallMsg.locationId = instanceWithUser.userId;
+
+				await this.sendToPlatform(transformedCallMsg, instanceWithUser);
 			} else {
 				this.gaLogger.warn(`Unhandled allowed Green API webhook type: ${webhook.typeWebhook}`);
 			}
@@ -428,6 +445,7 @@ export class GhlService extends BaseAdapter<
 			webhookUrl: `${appBaseUrl}/webhooks/green-api`,
 			webhookUrlToken: webhookToken,
 			incomingWebhook: "yes",
+			incomingCallWebhook: "yes",
 			stateWebhook: "yes",
 			wid: waSettings?.phone ? `${waSettings.phone}@c.us` : undefined,
 		};
