@@ -82,30 +82,25 @@ export class PrismaService
 			throw new NotFoundException(`User (GHL Location) with ID ${ghlLocationId} not found. Cannot create instance.`);
 		}
 
-		const createData = {
-			idInstance,
-			apiTokenInstance: instanceData.apiTokenInstance,
-			stateInstance: stateInstance || InstanceState.notAuthorized,
-			settings: instanceData.settings || {},
-			user: {
-				connect: {id: ghlLocationId},
-			},
-		};
+		const existingInstance = await this.instance.findUnique({
+			where: {idInstance},
+		});
 
-		const updateData = {
-			idInstance,
-			apiTokenInstance: instanceData.apiTokenInstance,
-			...(stateInstance && {stateInstance}),
-			...(instanceData.settings && {settings: instanceData.settings}),
-			user: {
-				connect: {id: ghlLocationId},
-			},
-		};
+		if (existingInstance) {
+			throw new Error(`Instance with ID ${idInstance} already exists.`);
+		}
 
-		return this.instance.upsert({
-			where: {userId: ghlLocationId},
-			create: createData,
-			update: updateData,
+		return this.instance.create({
+			data: {
+				idInstance,
+				apiTokenInstance: instanceData.apiTokenInstance,
+				stateInstance: stateInstance || InstanceState.notAuthorized,
+				settings: instanceData.settings || {},
+				name: instanceData.name,
+				user: {
+					connect: {id: ghlLocationId},
+				},
+			},
 		});
 	}
 
@@ -116,10 +111,10 @@ export class PrismaService
 		});
 	}
 
-	async getInstanceByUserId(userId: string): Promise<Instance | null> {
-		return this.instance.findUnique({
+	async getInstancesByUserId(userId: string): Promise<Instance[]> {
+		return this.instance.findMany({
 			where: {userId},
-			include: {user: true},
+			orderBy: {createdAt: "desc"},
 		});
 	}
 
@@ -140,6 +135,14 @@ export class PrismaService
 		return this.instance.update({
 			where: {idInstance: BigInt(idInstance)},
 			data: {stateInstance: state},
+		});
+	}
+
+	async updateInstanceName(idInstance: number | bigint, name: string): Promise<Instance & { user: User }> {
+		return this.instance.update({
+			where: {idInstance: BigInt(idInstance)},
+			data: {name},
+			include: {user: true},
 		});
 	}
 }

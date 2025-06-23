@@ -12,13 +12,13 @@ datasource db {
 }
 
 model User {
-  id             String    @id
+  id             String     @id
   companyId      String?
-  accessToken    String    @db.Text
-  refreshToken   String    @db.Text
+  accessToken    String     @db.Text
+  refreshToken   String     @db.Text
   tokenExpiresAt DateTime?
-  instance       Instance?
-  createdAt      DateTime  @default(now())
+  instances      Instance[]
+  createdAt      DateTime   @default(now())
 }
 
 enum InstanceState {
@@ -34,9 +34,12 @@ model Instance {
   idInstance       BigInt         @unique
   apiTokenInstance String
   stateInstance    InstanceState?
-  userId           String         @unique
+  userId           String
   user             User           @relation(fields: [userId], references: [id], onDelete: Cascade)
   /// [InstanceSettings]
   settings         Json?          @default("{}") @db.Json
+  name             String?
   createdAt        DateTime       @default(now())
+
+  @@index([userId])
 }

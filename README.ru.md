@@ -6,21 +6,16 @@
 от [GREEN-API](https://green-api.com) и состоит из
 адаптера NestJS, обеспечивающего связь между двумя платформами.
 
-**Важно:** Эта интеграция предназначена исключительно для **суб-аккаунтов** [GoHighLevel](https://www.gohighlevel.com).
-Попытка установить или
-использовать её на уровне агентства или выбрать "Agency" во время настройки приложения может привести к некорректной
-работе или проблемам с функциональностью.
-
 ## Обзор
 
 Данная документация проведет вас через процесс настройки вашей собственной интеграции
 между [GREEN-API](https://green-api.com) и [GoHighLevel](https://www.gohighlevel.com).
-Вместо использования готового приложения вы:
+Вы:
 
 1. Создадите своё собственное приложение в [GoHighLevel](https://www.gohighlevel.com) Marketplace
 2. Настроите и развернёте сервис-адаптер
-3. Свяжете ваш инстанс [GREEN-API](https://green-api.com) с вашим
-   суб-аккаунтом [GoHighLevel](https://www.gohighlevel.com)
+3. Свяжете один или несколько инстансов [GREEN-API](https://green-api.com) с вашим
+   суб-аккаунтом [GoHighLevel](https://www.gohighlevel.com) через удобный интерфейс управления
 
 ## Архитектура
 
@@ -33,12 +28,14 @@
 - Предоставляет конечные точки для вебхуков от [GoHighLevel](https://www.gohighlevel.com)
   и [GREEN-API](https://green-api.com)
 - Создаёт и управляет контактами из WhatsApp в [GoHighLevel](https://www.gohighlevel.com)
+- Поддерживает несколько инстансов [GREEN-API](https://green-api.com) на один суб-аккаунт с удобным интерфейсом
+  управления
 
 ## Предварительные требования
 
 - База данных MySQL (5.7 или выше)
 - Node.js 20 или выше
-- Аккаунт и инстанс [GREEN-API](https://green-api.com)
+- Аккаунт и инстанс(ы) [GREEN-API](https://green-api.com)
 - **Аккаунт разработчика** [GoHighLevel](https://www.gohighlevel.com). Вы можете создать его на
   сайте [https://marketplace.gohighlevel.com/](https://marketplace.gohighlevel.com/)
 - **Суб-аккаунт** [GoHighLevel](https://www.gohighlevel.com) для тестирования установки и функциональности приложения
@@ -61,6 +58,7 @@
     - НЕ выбирайте "Agency" или оба варианта, так как это может вызвать проблемы с функциональностью
 
 4. **Настройте OAuth:**
+    - Перейдите в "Advanced Settings" -> "Auth"
     - Настройте URL перенаправления: `YOUR_APP_URL/oauth/callback`
     - Выберите необходимые разрешения (scopes):
         - contacts.readonly
@@ -72,9 +70,10 @@
         - locations.readonly
         - users.readonly
 
-5. **Сгенерируйте Client ID и Client Secret:**
-    - Перейдите в раздел "API Credentials"
+5. **Сгенерируйте учетные данные:**
+    - Пролистайте до раздела "Client Keys"
     - Сгенерируйте Client ID и Client Secret
+    - Немного ниже будет раздел "Shared Secret" — сгенерируйте его тоже
     - Сохраните эти значения - они понадобятся для конфигурации адаптера
 
 6. **Настройте параметры вебхуков:**
@@ -90,15 +89,10 @@
     - При желании добавьте алиас и логотип
     - Сохраните Conversation Provider ID - он понадобится для конфигурации
 
-8. **Настройте внешнюю аутентификацию:**
-    - Включите External Authentication
-    - Выберите метод "API Key/Basic Auth"
-    - Добавьте два обязательных поля:
-        - Поле 1: Название "Instance ID", Ключ "instance_id", Тип "Text"
-        - Поле 2: Название "Instance Token", Ключ "api_token_instance", Тип "Text"
-    - Установите URL аутентификации: `YOUR_APP_URL/oauth/external-auth-credentials`
-    - Установите метод: POST
-    - Сохраните конфигурацию
+8. **Настройте пользовательскую страницу:**
+    - Включите функциональность Custom Page
+    - Установите URL пользовательской страницы: `YOUR_APP_URL/app/whatsapp`
+    - Это предоставит пользователям интерфейс для управления их инстансами GREEN-API
 
 ## Шаг 2: Настройка адаптера
 
@@ -125,12 +119,14 @@
    GHL_CLIENT_ID="your_ghl_client_id_from_developer_portal"
    GHL_CLIENT_SECRET="your_ghl_client_secret_from_developer_portal"
    GHL_CONVERSATION_PROVIDER_ID="your_ghl_conversation_provider_id_from_app_settings"
+   GHL_SHARED_SECRET="your_secure_random_string_for_encryption"
    ```
 
     - `DATABASE_URL`: Строка подключения к вашей базе данных MySQL
     - `APP_URL`: Публичный URL, где будет развернут ваш адаптер
     - `GHL_CLIENT_ID` и `GHL_CLIENT_SECRET`: Из шага 5 настройки приложения GHL
     - `GHL_CONVERSATION_PROVIDER_ID`: Из шага 7 настройки приложения GHL
+    - `GHL_SHARED_SECRET`: Из шага 5 настройки приложения GHL
 
 4. **Примените миграции базы данных:**
 
@@ -158,33 +154,34 @@
 version: '3.8'
 
 services:
-    adapter:
-        build: .
-        ports:
-            - "3000:3000"
-        environment:
-            - DATABASE_URL=${DATABASE_URL}
-            - APP_URL=${APP_URL}
-            - GHL_CLIENT_ID=${GHL_CLIENT_ID}
-            - GHL_CLIENT_SECRET=${GHL_CLIENT_SECRET}
-            - GHL_CONVERSATION_PROVIDER_ID=${GHL_CONVERSATION_PROVIDER_ID}
-        depends_on:
-            - db
-        restart: unless-stopped
+  adapter:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      - DATABASE_URL=${DATABASE_URL}
+      - APP_URL=${APP_URL}
+      - GHL_CLIENT_ID=${GHL_CLIENT_ID}
+      - GHL_CLIENT_SECRET=${GHL_CLIENT_SECRET}
+      - GHL_CONVERSATION_PROVIDER_ID=${GHL_CONVERSATION_PROVIDER_ID}
+      - GHL_SHARED_SECRET=${GHL_SHARED_SECRET}
+    depends_on:
+      - db
+    restart: unless-stopped
 
-    db:
-        image: mysql:8
-        environment:
-            - MYSQL_ROOT_PASSWORD=your_strong_root_password
-            - MYSQL_USER=your_db_user
-            - MYSQL_PASSWORD=your_db_password
-            - MYSQL_DATABASE=ghl_adapter
-        volumes:
-            - mysql_data:/var/lib/mysql
-        restart: unless-stopped
+  db:
+    image: mysql:8
+    environment:
+      - MYSQL_ROOT_PASSWORD=your_strong_root_password
+      - MYSQL_USER=your_db_user
+      - MYSQL_PASSWORD=your_db_password
+      - MYSQL_DATABASE=ghl_adapter
+    volumes:
+      - mysql_data:/var/lib/mysql
+    restart: unless-stopped
 
 volumes:
-    mysql_data:
+  mysql_data:
 ```
 
 ### Dockerfile
@@ -224,17 +221,30 @@ docker-compose down
 интеграцию:
 
 1. **Установите приложение в ваш суб-аккаунт [GoHighLevel](https://www.gohighlevel.com):**
+    - Перейдите в "App Marketplace" (расположен в боковой панели)
     - Если ваше приложение приватное:
         - Скопируйте ID вашего приложения из marketplace.gohighlevel.com
-        - Из вашего суб-аккаунта [GoHighLevel](https://www.gohighlevel.com) перейдите в маркетплейс
         - Нажмите на любое приложение и измените URL, заменив ID приложения на ID вашего приложения
+    - Если ваше приложение публичное, вы можете просто найти его в поиске
     - Нажмите "Install" на странице вашего приложения и затем "Allow and Install"
 
-2. **Завершите аутентификацию [GREEN-API](https://green-api.com):**
-    - После OAuth-авторизации вы можете закрыть страницу, на которую вас перенаправили, и вернуться на предыдущую
-      страницу, где вам будет предложено ввести учетные данные [GREEN-API](https://green-api.com)
-    - Введите ваш Instance ID и API Token [GREEN-API](https://green-api.com) (из console.green-api.com)
-    - Система проверит и свяжет ваш инстанс [GREEN-API](https://green-api.com) с вашим аккаунтом GHL
+2. **Получите доступ к интерфейсу управления инстансами WhatsApp:**
+    - После установки вы можете перейти к пользовательской странице для управления вашими инстансами GREEN-API (появится в боковой панели)
+    - Интерфейс позволит вам добавлять/управлять несколькими инстансами
+
+3. **Добавьте инстансы GREEN-API:**
+    - Используйте интерфейс управления для добавления ваших инстансов GREEN-API
+    - Для каждого инстанса предоставьте:
+        - Имя инстанса (необязательно, для удобной идентификации)
+        - ID инстанса (из console.green-api.com)
+        - API Token (из console.green-api.com)
+    - Вы можете добавить несколько инстансов и управлять ими независимо
+
+4. **Управляйте вашими инстансами:**
+    - Просматривайте все ваши подключенные инстансы GREEN-API
+    - Редактируйте имена инстансов для лучшей организации
+    - Удаляйте инстансы, когда они больше не нужны
+    - Отслеживайте статус инстансов и состояние авторизации
 
 ## Как работает интеграция
 
@@ -242,10 +252,11 @@ docker-compose down
 
 ### Входящие сообщения (WhatsApp → GHL)
 
-1. Когда клиент отправляет сообщение на ваш номер WhatsApp:
+1. Когда клиент отправляет сообщение на любой из ваших номеров WhatsApp:
     - [GREEN-API](https://green-api.com) получает сообщение и отправляет его в ваш адаптер
     - Адаптер создает или обновляет контакт в GHL
-    - Сообщение появляется в интерфейсе переписки GHL
+    - Контакт помечается тегом с конкретным ID инстанса, с которым связались (Данный тег нельзя изменить никаким образом)
+    - Сообщение появляется в интерфейсе диалогов GHL
 
 2. Поддерживаемые типы входящих сообщений:
     - Текстовые сообщения
@@ -258,28 +269,38 @@ docker-compose down
 
 1. Чтобы ответить контакту WhatsApp:
     - Используйте стандартный интерфейс сообщений GHL
-    - Сообщение будет направлено через ваш адаптер в [GREEN-API](https://green-api.com) и доставлено по WhatsApp
+    - Сообщение будет направлено через ваш адаптер к соответствующему инстансу [GREEN-API](https://green-api.com)
+      на основе тега контакта
 
 2. Поддерживаемые типы исходящих сообщений:
     - Текстовые сообщения
     - Вложенные файлы
+
+### Важное замечание о диалогах с несколькими инстансами
+
+**⚠️ Важно:** Если один и тот же номер телефона пишет на несколько ваших инстансов GREEN-API (разные номера WhatsApp),
+данная интеграция **не будет** создавать отдельные диалоги с данным клиентом. Все сообщения от этого номера телефона, независимо от того, с
+каким
+инстансом они связались, будут появляться в **одном диалоге**.
 
 ## Устранение неполадок
 
 ### Распространенные проблемы
 
 1. **Сообщения не доставляются:**
-    - Проверьте, что ваш инстанс [GREEN-API](https://green-api.com) авторизован
     - Проверьте логи адаптера на наличие ошибок
     - Убедитесь, что URL вебхуков настроены правильно
+    - Проверьте статус инстансов в интерфейсе управления
 
-2. **Проблемы с установкой приложения:**
-    - Убедитесь, что ваше приложение настроено только для Sub-Account
-    - Проверьте, что внешняя аутентификация (External Authentication) настроена правильно
+2. **Проблемы управления инстансами:**
+    - Проверьте, что OAuth-аутентификация завершена первой
+    - Убедитесь, что все необходимые переменные окружения установлены
+    - Проверьте, что пользовательская страница может связаться с вашим сервисом-адаптером
 
 3. **Ошибки подключения к базе данных:**
     - Проверьте правильность DATABASE_URL
     - Убедитесь, что пользователь базы данных имеет соответствующие разрешения
+    - Проверьте, что миграции базы данных были применены
 
 ## Лицензия
 
