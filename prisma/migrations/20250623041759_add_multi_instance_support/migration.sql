@@ -1,11 +1,11 @@
 -- DropForeignKey
-ALTER TABLE `instance` DROP FOREIGN KEY `Instance_userId_fkey`;
+ALTER TABLE `Instance` DROP FOREIGN KEY `Instance_userId_fkey`;
 
 -- DropIndex
-DROP INDEX `Instance_userId_key` ON `instance`;
+DROP INDEX `Instance_userId_key` ON `Instance`;
 
 -- AlterTable
-ALTER TABLE `instance` ADD COLUMN `name` VARCHAR(191) NULL;
+ALTER TABLE `Instance` ADD COLUMN `name` VARCHAR(191) NULL;
 
 -- CreateIndex
 CREATE INDEX `Instance_userId_idx` ON `Instance`(`userId`);
