@@ -15,6 +15,20 @@ export interface MessageStatusPayload {
 	};
 }
 
+export interface AuthReq extends Request {
+  locationId: string;
+}
+
+export interface GhlUserData {
+	userId: string;
+	companyId: string;
+	role: string;
+	type: "location" | "agency";
+	userName: string;
+	email: string;
+	activeLocation: string;
+}
+
 export interface GhlPlatformMessage {
 	contactId: string;
 	locationId: string;

@@ -15,7 +15,13 @@ import { PrismaService } from "../prisma/prisma.service";
 import { GhlWebhookDto } from "./dto/ghl-webhook.dto";
 import type { Instance, User } from "@prisma/client";
 import { randomBytes } from "crypto";
-import { GhlContact, GhlContactUpsertResponse, GhlPlatformMessage, MessageStatusPayload } from "../types";
+import {
+	GhlContact,
+	GhlContactUpsertRequest,
+	GhlContactUpsertResponse,
+	GhlPlatformMessage,
+	MessageStatusPayload,
+} from "../types";
 
 @Injectable()
 export class GhlService extends BaseAdapter<
@@ -151,32 +157,42 @@ export class GhlService extends BaseAdapter<
 		phone: string,
 		name?: string,
 		instanceId?: string,
+		isGroup?: boolean,
 	): Promise<{ id: string; [key: string]: any }> {
 		const httpClient = await this.getHttpClient(ghlUserId);
-		const formattedPhone = phone.startsWith("+") ? phone : `+${phone}`;
-		const tags = [`whatsapp-instance-${instanceId}`];
 
-		const upsertPayload = {
+		let contactName: string;
+		let tags = [`whatsapp-instance-${instanceId}`];
+
+		if (isGroup) {
+			contactName = `[Group] ${name || "Unknown Group"}`;
+			tags.push("whatsapp-group");
+		} else {
+			contactName = name || `WhatsApp ${phone}`;
+		}
+
+		const upsertPayload: GhlContactUpsertRequest = {
 			locationId: ghlUserId,
-			phone: formattedPhone,
-			name: name || `WhatsApp ${formattedPhone}`,
+			phone: phone,
+			name: contactName,
 			source: "GREEN-API",
 			tags: instanceId ? tags : undefined,
 		};
-		this.gaLogger.info(`Upserting GHL contact for phone ${formattedPhone} in Location ${ghlUserId} with payload:`, upsertPayload);
+
+		this.gaLogger.info(`Upserting GHL contact for ${isGroup ? "group" : "phone"} ${phone} in Location ${ghlUserId} with payload:`, upsertPayload);
 
 		try {
 			const {data} = await httpClient.post("/contacts/upsert", upsertPayload);
 
 			if (data && data.contact && data.contact.id) {
-				this.gaLogger.log(`Successfully upserted GHL contact. ID: ${data.contact.id} for phone ${formattedPhone} in Location ${ghlUserId}`);
+				this.gaLogger.log(`Successfully upserted GHL contact. ID: ${data.contact.id} for ${isGroup ? "group" : "phone"} ${phone} in Location ${ghlUserId}`);
 				return data.contact;
 			} else {
 				this.gaLogger.error("Failed to upsert contact or get ID from response. Response data:", data);
 				throw new Error("Could not get ID from GHL contact upsert response.");
 			}
 		} catch (error) {
-			this.gaLogger.error(`Error during GHL contact upsert for phone ${formattedPhone} in Location ${ghlUserId}: ${error.message}`, error.response?.data);
+			this.gaLogger.error(`Error during GHL contact upsert for ${isGroup ? "group" : "phone"} ${phone} in Location ${ghlUserId}: ${error.message}`, error.response?.data);
 			throw error;
 		}
 	}
@@ -378,13 +394,28 @@ export class GhlService extends BaseAdapter<
 			if (webhook.typeWebhook === "stateInstanceChanged") {
 				await this.handleStateInstanceWebhook(webhook);
 			} else if (webhook.typeWebhook === "incomingMessageReceived") {
-				const senderPhoneRaw = webhook.senderData.sender;
-				const normalizedPhone = senderPhoneRaw.split("@")[0];
-				const senderName = webhook.senderData.senderName || webhook.senderData.chatName || `WhatsApp ${normalizedPhone}`;
+				const isGroup = webhook.senderData?.chatId?.endsWith("@g.us") || false;
+
+				const contactIdentifier = webhook.senderData.chatId.replace(/@[cg]\.us$/, "");
+				let contactName: string;
+				let logContext: string;
+
+				if (isGroup) {
+					contactName = webhook.senderData.chatName || "Unknown Group";
+					logContext = `group "${contactName}" (${contactIdentifier}) sent by ${webhook.senderData.senderName || "Unknown"}`;
+				} else {
+					contactName = webhook.senderData.senderName || webhook.senderData.senderContactName || `WhatsApp ${contactIdentifier}`;
+					logContext = `individual ${contactName} (${contactIdentifier})`;
+				}
+
+				this.gaLogger.log(`Processing message from ${logContext}`);
 
 				const ghlContact = await this.findOrCreateGhlContact(
 					instanceWithUser.userId,
-					normalizedPhone, senderName, webhook.instanceData.idInstance.toString(),
+					contactIdentifier,
+					contactName,
+					webhook.instanceData.idInstance.toString(),
+					isGroup,
 				);
 				if (!ghlContact?.id) throw new IntegrationError("Failed to resolve GHL contact.", "GHL_API_ERROR");
 

@@ -21,6 +21,9 @@ export class GhlTransformer
 		const attachments: GhlPlatformMessage["attachments"] = [];
 
 		if (webhook.typeWebhook === "incomingMessageReceived") {
+			const isGroup = webhook.senderData?.chatId?.endsWith("@g.us") || false;
+			const senderName = webhook.senderData.senderName || webhook.senderData.senderContactName || "Unknown";
+			const senderNumber = webhook.senderData.sender;
 			const msgData = webhook.messageData;
 			switch (msgData.typeMessage) {
 				case "textMessage":
@@ -145,6 +148,11 @@ export class GhlTransformer
 					this.logger.warn(`Unsupported Green API message type: ${msgData.typeMessage}`);
 					messageText = `User sent an unsupported message type`;
 			}
+
+			if (isGroup) {
+				messageText = `${senderName} (+${senderNumber.split("@c.us")[0]}):\n\n ${messageText}`;
+			}
+
 			return {
 				contactId: "placeholder_ghl_contact_id",
 				locationId: "placeholder_ghl_location_id",
@@ -200,12 +208,15 @@ export class GhlTransformer
 		this.logger.debug(`Transforming GHL Webhook to Green API Message: ${JSON.stringify(ghlWebhook)}`);
 
 		if (ghlWebhook.type === "SMS" && ghlWebhook.phone) {
+			const isGroupChatId = ghlWebhook.phone.length > 16;
+			const chatId = formatPhoneNumber(ghlWebhook.phone, isGroupChatId ? "group" : "private");
+
 			if (ghlWebhook.attachments && ghlWebhook.attachments.length > 0) {
 				const attachmentUrl = ghlWebhook.attachments[0];
 				this.logger.debug(`GHL webhook has attachments. Processing as url-file. Attachment URL: ${attachmentUrl}`);
 				return {
 					type: "url-file",
-					chatId: formatPhoneNumber(ghlWebhook.phone),
+					chatId: chatId,
 					file: {
 						url: attachmentUrl,
 						fileName: `${Date.now()}_${ghlWebhook.messageId || "unknown"}`.replace(/[^a-zA-Z0-9_.-]/g, "_"),
@@ -216,7 +227,7 @@ export class GhlTransformer
 				this.logger.debug(`GHL webhook has a text message. Processing as text. Message: "${ghlWebhook.message}"`);
 				return {
 					type: "text",
-					chatId: formatPhoneNumber(ghlWebhook.phone),
+					chatId: chatId,
 					message: ghlWebhook.message,
 				};
 			} else {

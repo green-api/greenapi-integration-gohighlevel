@@ -13,7 +13,8 @@ and [GoHighLevel](https://www.gohighlevel.com). You will:
 
 1. Create your own [GoHighLevel](https://www.gohighlevel.com) Marketplace app
 2. Configure and deploy the adapter service
-3. Link one or multiple [GREEN-API](https://green-api.com/en) instances with your [GoHighLevel](https://www.gohighlevel.com)
+3. Link one or multiple [GREEN-API](https://green-api.com/en) instances with
+   your [GoHighLevel](https://www.gohighlevel.com)
    sub-account through an easy-to-use management interface
 
 ## Architecture
@@ -75,11 +76,7 @@ Marketplace app:
     - A little below there will be "Shared Secret" section — generate it as well.
     - Save these values - you'll need them for the adapter configuration
 
-6. **Configure webhook settings:**
-    - Set up the default webhook URL: `YOUR_APP_URL/webhooks/ghl`
-    - Enable the "OutboundMessage" webhook event
-
-7. **Create a Conversation Provider:**
+6. **Create a Conversation Provider:**
     - Navigate to "Conversation Provider" in the app settings
     - Name: "[GREEN-API](https://green-api.com/en)" (or any name you prefer)
     - Type: **SMS**
@@ -88,7 +85,7 @@ Marketplace app:
     - Add an alias and logo if desired
     - Save the Conversation Provider ID - you'll need it for configuration
 
-8. **Configure Custom Page:**
+7. **Configure Custom Page:**
     - Enable Custom Page functionality
     - Set Custom Page URL to: `YOUR_APP_URL/app/whatsapp`
     - This will provide users with an interface to manage their GREEN-API instances
@@ -227,7 +224,8 @@ install and use the integration:
     - Click "Install" on your app's page and then "Allow and Install"
 
 2. **Access the WhatsApp Instance Management Interface:**
-    - After installation, you can go to the custom page to manage your GREEN-API instances (will appear in the side panel)
+    - After installation, you can go to the custom page to manage your GREEN-API instances (will appear in the side
+      panel)
     - The interface will allow you to add/manage multiple instances
 
 3. **Add GREEN-API Instances:**
@@ -263,6 +261,12 @@ Once installed, the integration works automatically:
     - Contact cards
     - And more (stickers, polls, etc.)
 
+3. **Group Support:**
+    - **Group messages are fully supported** - when someone sends a message in a WhatsApp group
+    - **Group contacts** are created with names like `[Group] Sales Team` to clearly identify them as groups
+    - **Group "phone" numbers** are actually the group's chat ID (a long numeric identifier like `120363418570879210`)
+    - **Group messages** show the sender's name and their phone number: `John Doe (+1234567890): Hello everyone!`
+
 ### Outgoing Messages (GHL → WhatsApp)
 
 1. To reply to a WhatsApp contact:
@@ -274,11 +278,17 @@ Once installed, the integration works automatically:
     - Text messages
     - File attachments
 
-### Important Note About Multi-Instance Conversations
+### Important Note
 
-**⚠️ Important:** If the same phone number writes to multiple of your GREEN-API instances (different WhatsApp numbers),
+**⚠️ Multi-Instance Conversations:** If the same phone number writes to multiple of your GREEN-API instances (different WhatsApp numbers),
 this integration will **not** create separate conversations. All messages from that phone number, regardless of which
 instance they contact, will appear in a **single conversation thread**.
+
+**📱 Group Identification:** Group contacts can be easily identified by:
+
+- Contact name starting with `[Group]`
+- Phone field containing a long numeric ID instead of a traditional phone number
+- `whatsapp-group` tag automatically applied to group contacts
 
 ## Troubleshooting
 

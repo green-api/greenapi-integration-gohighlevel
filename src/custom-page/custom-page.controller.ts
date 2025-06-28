@@ -612,7 +612,41 @@ export class CustomPageController {
             font-size: 14px;
           }
           
+          .instance-actions {
+            display: flex;
+            gap: 12px;
+            margin-top: 20px;
+            flex-wrap: wrap;
+          }
+			
+          .instance-actions .btn {
+            padding: 10px 18px;
+            font-size: 14px;
+            flex: 1;
+            min-width: 100px;
+          }
+			
+          .btn[title*="Console"] {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            position: relative;
+          }
+			
+          .btn[title*="Console"]:hover {
+            background: linear-gradient(135deg, #5a6fd8 0%, #6a4190 100%);
+            box-shadow: 0 6px 20px rgba(102, 126, 234, 0.3);
+          }
+          
           @media (max-width: 768px) {
+		    .instance-actions {
+			  flex-direction: column;
+		    }
+		  
+		    .instance-actions .btn {
+			  width: 100%;
+			  margin-bottom: 8px;
+			  flex: none;
+		    }
             body {
               padding: 10px;
             }
@@ -719,11 +753,6 @@ export class CustomPageController {
                 <h2>➕ Add New Instance</h2>
                 <form id="instanceForm">
                   <div class="form-group">
-                    <label for="instanceName">Instance Name (optional)</label>
-                    <input type="text" id="instanceName" name="instanceName" placeholder="e.g., Sales Team WhatsApp">
-                  </div>
-                  
-                  <div class="form-group">
                     <label for="instanceId">Instance ID</label>
                     <input type="text" id="instanceId" name="instanceId" placeholder="e.g., 1234567890" required>
                   </div>
@@ -731,6 +760,11 @@ export class CustomPageController {
                   <div class="form-group">
                     <label for="apiToken">API Token</label>
                     <input type="text" id="apiToken" name="apiToken" placeholder="Your GREEN-API token" required>
+                  </div>
+                  
+                  <div class="form-group">
+                    <label for="instanceName">Instance Name (optional)</label>
+                    <input type="text" id="instanceName" name="instanceName" placeholder="e.g., Sales Team WhatsApp">
                   </div>
                   
                   <button type="submit" id="submitBtn" class="btn">Add Instance</button>
@@ -865,6 +899,7 @@ export class CustomPageController {
             constructor() {
               this.userData = null;
               this.locationId = null;
+              this.encryptedUserData = null;
               this.instances = [];
               this.init();
             }
@@ -880,6 +915,11 @@ export class CustomPageController {
                 }
               }, 10000);
             }
+            
+            openGreenApiConsole(instanceId) {
+			  const consoleUrl = \`https://console.green-api.com/instanceList/\${instanceId}\`;
+			  window.open(consoleUrl, '_blank', 'noopener,noreferrer');
+			}
 
             handleMessage(event) {
               if (event.data && event.data.message === 'REQUEST_USER_DATA_RESPONSE') {
@@ -896,6 +936,8 @@ export class CustomPageController {
                 this.handleError('No encrypted user data received');
                 return;
               }
+              
+              this.encryptedUserData = encryptedUserData;
 
               try {
                 const response = await fetch('/app/decrypt-user-data', {
@@ -923,6 +965,17 @@ export class CustomPageController {
                 this.handleError('Network error: ' + error.message);
               }
             }
+            
+            async makeAuthenticatedRequest(url, options = {}) {
+				return fetch(url, {
+				  ...options,
+				  headers: {
+					...options.headers,
+					'X-GHL-Context': this.encryptedUserData, // Include encrypted data
+					'Content-Type': 'application/json',
+				  },
+				});
+			  }
 
             handleError(error) {
               document.getElementById('loadingSection').classList.add('hidden');
@@ -964,7 +1017,7 @@ export class CustomPageController {
 
             async loadInstances() {
               try {
-                const response = await fetch(\`/api/instances/\${this.locationId}\`);
+                const response = await this.makeAuthenticatedRequest(\`/api/instances/\${this.locationId}\`);
                 const result = await response.json();
                 
                 if (result.success) {
@@ -1003,6 +1056,9 @@ export class CustomPageController {
                     <strong>Created:</strong> \${new Date(instance.createdAt).toLocaleDateString()}
                   </div>
                   <div class="instance-actions">
+                  	<button onclick="window.instanceHandler.openGreenApiConsole('\${instance.id}')" class="btn" title="Open GREEN-API Console">
+					  Open Console
+					</button>
                     <button onclick="window.instanceHandler.toggleEditMode('\${instance.id}')" class="btn secondary">Edit Name</button>
                     <button class="btn danger" onclick="window.instanceHandler.deleteInstance('\${instance.id}')">Delete</button>
                   </div>
@@ -1037,7 +1093,7 @@ export class CustomPageController {
               }
               
               try {
-                const response = await fetch(\`/api/instances/\${instanceId}\`, {
+                const response = await this.makeAuthenticatedRequest(\`/api/instances/\${instanceId}\`, {
                   method: 'PATCH',
                   headers: {
                     'Content-Type': 'application/json',
@@ -1067,7 +1123,7 @@ export class CustomPageController {
               }
               
               try {
-                const response = await fetch(\`/api/instances/\${instanceId}\`, {
+                const response = await this.makeAuthenticatedRequest(\`/api/instances/\${instanceId}\`, {
                   method: 'DELETE'
                 });
                 
@@ -1106,7 +1162,7 @@ export class CustomPageController {
               resultDiv.innerHTML = '<div class="alert info">Creating instance...</div>';
 
               try {
-                const response = await fetch('/api/instances', {
+                const response = await this.makeAuthenticatedRequest('/api/instances', {
                   method: 'POST',
                   headers: {
                     'Content-Type': 'application/json',

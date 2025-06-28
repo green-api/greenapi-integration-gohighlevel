@@ -7,11 +7,13 @@ import {
 	Body,
 	Param,
 	HttpException,
-	HttpStatus,
+	HttpStatus, Req, UseGuards,
 } from "@nestjs/common";
 import { PrismaService } from "../prisma/prisma.service";
 import { GhlService } from "./ghl.service";
 import { GreenApiLogger } from "@green-api/greenapi-integration";
+import { AuthReq } from "../types";
+import { GhlContextGuard } from "./guards/ghl-context.guard";
 
 interface CreateInstanceDto {
 	locationId: string;
@@ -25,6 +27,7 @@ interface UpdateInstanceDto {
 }
 
 @Controller("api/instances")
+@UseGuards(GhlContextGuard)
 export class GhlController {
 	private readonly logger = GreenApiLogger.getInstance(GhlController.name);
 
@@ -34,7 +37,10 @@ export class GhlController {
 	) {}
 
 	@Get(":locationId")
-	async getInstances(@Param("locationId") locationId: string) {
+	async getInstances(@Param("locationId") locationId: string, @Req() req: AuthReq) {
+		if (req.locationId !== locationId) {
+			throw new HttpException("Unauthorized", HttpStatus.FORBIDDEN);
+		}
 		this.logger.log(`Getting instances for location: ${locationId}`);
 
 		const user = await this.prisma.findUser(locationId);
@@ -43,7 +49,7 @@ export class GhlController {
 		}
 
 		const instances = await this.prisma.getInstancesByUserId(locationId);
-		
+
 		return {
 			success: true,
 			instances: instances.map(instance => ({
@@ -51,13 +57,16 @@ export class GhlController {
 				name: instance.name || `Instance ${instance.idInstance}`,
 				state: instance.stateInstance,
 				createdAt: instance.createdAt,
-				settings: instance.settings
-			}))
+				settings: instance.settings,
+			})),
 		};
 	}
 
 	@Post()
-	async createInstance(@Body() dto: CreateInstanceDto) {
+	async createInstance(@Body() dto: CreateInstanceDto, @Req() req: AuthReq) {
+		if (req.locationId !== dto.locationId) {
+			throw new HttpException("Unauthorized", HttpStatus.FORBIDDEN);
+		}
 		this.logger.log(`Creating instance for location: ${dto.locationId}`);
 
 		const user = await this.prisma.findUser(dto.locationId);
@@ -74,7 +83,7 @@ export class GhlController {
 				dto.locationId,
 				BigInt(dto.instanceId),
 				dto.apiToken,
-				dto.name
+				dto.name,
 			);
 
 			return {
@@ -83,29 +92,33 @@ export class GhlController {
 					id: instance.idInstance.toString(),
 					name: instance.name || `Instance ${instance.idInstance}`,
 					state: instance.stateInstance,
-					createdAt: instance.createdAt
-				}
+					createdAt: instance.createdAt,
+				},
 			};
 		} catch (error) {
 			this.logger.error(`Error creating instance: ${error.message}`, error.stack);
-			
+
 			if (error.message.includes("already exists")) {
 				throw new HttpException("Instance ID already exists", HttpStatus.CONFLICT);
 			}
-			
+
 			if (error.code === "INVALID_CREDENTIALS") {
 				throw new HttpException("Invalid GREEN-API credentials", HttpStatus.BAD_REQUEST);
 			}
-			
+
 			throw new HttpException(
 				error.message || "Failed to create instance",
-				HttpStatus.INTERNAL_SERVER_ERROR
+				HttpStatus.INTERNAL_SERVER_ERROR,
 			);
 		}
 	}
 
 	@Delete(":instanceId")
-	async deleteInstance(@Param("instanceId") instanceId: string) {
+	async deleteInstance(@Param("instanceId") instanceId: string, @Req() req: AuthReq) {
+		const instance = await this.prisma.getInstance(BigInt(instanceId));
+		if (!instance || (instance.userId !== req.locationId)) {
+			throw new HttpException("Unauthorized", HttpStatus.FORBIDDEN);
+		}
 		this.logger.log(`Deleting instance: ${instanceId}`);
 
 		try {
@@ -118,17 +131,17 @@ export class GhlController {
 
 			return {
 				success: true,
-				message: "Instance deleted successfully"
+				message: "Instance deleted successfully",
 			};
 		} catch (error) {
 			if (error instanceof HttpException) {
 				throw error;
 			}
-			
+
 			this.logger.error(`Error deleting instance: ${error.message}`, error.stack);
 			throw new HttpException(
 				"Failed to delete instance",
-				HttpStatus.INTERNAL_SERVER_ERROR
+				HttpStatus.INTERNAL_SERVER_ERROR,
 			);
 		}
 	}
@@ -136,7 +149,7 @@ export class GhlController {
 	@Patch(":instanceId")
 	async updateInstance(
 		@Param("instanceId") instanceId: string,
-		@Body() dto: UpdateInstanceDto
+		@Body() dto: UpdateInstanceDto,
 	) {
 		this.logger.log(`Updating instance: ${instanceId}`);
 		try {
@@ -155,17 +168,17 @@ export class GhlController {
 					name: instance.name || `Instance ${instance.idInstance}`,
 					state: instance.stateInstance,
 					createdAt: instance.createdAt,
-				}
+				},
 			};
 		} catch (error) {
 			if (error instanceof HttpException) {
 				throw error;
 			}
-			
+
 			this.logger.error(`Error updating instance: ${error.message}`, error.stack);
 			throw new HttpException(
 				"Failed to update instance",
-				HttpStatus.INTERNAL_SERVER_ERROR
+				HttpStatus.INTERNAL_SERVER_ERROR,
 			);
 		}
 	}
