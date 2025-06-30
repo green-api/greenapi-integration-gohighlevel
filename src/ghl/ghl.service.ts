@@ -163,6 +163,7 @@ export class GhlService extends BaseAdapter<
 
 		let contactName: string;
 		let tags = [`whatsapp-instance-${instanceId}`];
+		const formattedPhone = phone.startsWith("+") ? phone : `+${phone}`;
 
 		if (isGroup) {
 			contactName = `[Group] ${name || "Unknown Group"}`;
@@ -173,19 +174,19 @@ export class GhlService extends BaseAdapter<
 
 		const upsertPayload: GhlContactUpsertRequest = {
 			locationId: ghlUserId,
-			phone: phone,
+			phone: formattedPhone,
 			name: contactName,
 			source: "GREEN-API",
 			tags: instanceId ? tags : undefined,
 		};
 
-		this.gaLogger.info(`Upserting GHL contact for ${isGroup ? "group" : "phone"} ${phone} in Location ${ghlUserId} with payload:`, upsertPayload);
+		this.gaLogger.info(`Upserting GHL contact for ${isGroup ? "group" : "phone"} ${formattedPhone} in Location ${ghlUserId} with payload:`, upsertPayload);
 
 		try {
 			const {data} = await httpClient.post("/contacts/upsert", upsertPayload);
 
 			if (data && data.contact && data.contact.id) {
-				this.gaLogger.log(`Successfully upserted GHL contact. ID: ${data.contact.id} for ${isGroup ? "group" : "phone"} ${phone} in Location ${ghlUserId}`);
+				this.gaLogger.log(`Successfully upserted GHL contact. ID: ${data.contact.id} for ${isGroup ? "group" : "phone"} ${formattedPhone} in Location ${ghlUserId}`);
 				return data.contact;
 			} else {
 				this.gaLogger.error("Failed to upsert contact or get ID from response. Response data:", data);
