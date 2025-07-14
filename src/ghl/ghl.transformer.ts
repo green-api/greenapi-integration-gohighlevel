@@ -144,9 +144,55 @@ export class GhlTransformer
 					const invite = msgData.groupInviteMessageData;
 					messageText = `👥 User sent a group invitation for "${invite.groupName}".\nCaption: ${invite.caption}`;
 					break;
+
+				case "interactiveButtons":
+					const interactiveButtons = msgData.interactiveButtons;
+					const intButtonsList = interactiveButtons.buttons
+						?.map((button) => {
+							let buttonDescription = `• ${button.buttonText}`;
+							if (button.type === "url" && button.url) {
+								buttonDescription += ` (${button.url})`;
+							} else if (button.type === "call" && button.phoneNumber) {
+								buttonDescription += ` (📞 ${button.phoneNumber})`;
+							} else if (button.type === "copy" && button.copyCode) {
+								buttonDescription += ` (📋 Copy: "${button.copyCode}")`;
+							}
+							return buttonDescription;
+						})
+						.join("\n") || "";
+
+					messageText = [
+						"🔘 Interactive message with buttons:",
+						interactiveButtons.titleText && `Title: ${interactiveButtons.titleText}`,
+						interactiveButtons.contentText,
+						intButtonsList && `\nButtons:\n${intButtonsList}`,
+						interactiveButtons.footerText && `\nFooter: ${interactiveButtons.footerText}`,
+					].filter(Boolean).join("\n");
+					break;
+
+				case "interactiveButtonsReply":
+					const interactiveButtonsReply = msgData.interactiveButtonsReply;
+					const replyButtonsList = interactiveButtonsReply.buttons
+						?.map((button) => `• ${button.buttonText}`)
+						.join("\n") || "";
+
+					messageText = [
+						"💬 Interactive reply message with buttons:",
+						interactiveButtonsReply.titleText && `Title: ${interactiveButtonsReply.titleText}`,
+						interactiveButtonsReply.contentText,
+						replyButtonsList && `\nReply options:\n${replyButtonsList}`,
+						interactiveButtonsReply.footerText && `\nFooter: ${interactiveButtonsReply.footerText}`,
+					].filter(Boolean).join("\n");
+					break;
+
+				case "templateButtonsReplyMessage":
+					const templateButtonReply = msgData.templateButtonReplyMessage;
+					messageText = `✅ Button clicked:\n\n${templateButtonReply.selectedDisplayText}`;
+					break;
+
 				default:
-					this.logger.warn(`Unsupported Green API message type: ${msgData.typeMessage}`);
-					messageText = `User sent an unsupported message type`;
+					this.logger.warn(`Unsupported GREEN-API message type`, msgData);
+					messageText = "User sent an unsupported message type";
 			}
 
 			if (isGroup) {
