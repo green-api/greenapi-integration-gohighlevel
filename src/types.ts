@@ -16,7 +16,7 @@ export interface MessageStatusPayload {
 }
 
 export interface AuthReq extends Request {
-  locationId: string;
+	locationId: string;
 }
 
 export interface GhlUserData {
@@ -26,7 +26,59 @@ export interface GhlUserData {
 	type: "location" | "agency";
 	userName: string;
 	email: string;
-	activeLocation: string;
+	activeLocation?: string;
+}
+
+export interface InstalledLocation {
+	_id: string;
+	name: string;
+	address: string;
+	isInstalled: boolean;
+}
+
+export interface InstalledLocationsResponse {
+	locations: InstalledLocation[];
+	count: number;
+	installToFutureLocations: boolean;
+}
+
+export interface LocationTokenResponse {
+	access_token: string;
+	refresh_token: string;
+	expires_in: number;
+	scope: string;
+	locationId: string;
+	planId: string;
+	userId: string;
+}
+
+export interface WorkflowActionResult {
+	success: boolean;
+	messageId: string;
+	contactId?: string;
+	warning?: string;
+}
+
+export interface WorkflowActionData {
+	instanceId: string;
+	message?: string;
+	url?: string;
+	fileName?: string;
+	caption?: string;
+	header?: string;
+	body?: string;
+	footer?: string;
+	button1Type?: string;
+	button1Text?: string;
+	button1Value?: string;
+	button2Type?: string;
+	button2Text?: string;
+	button2Value?: string;
+	button3Type?: string;
+	button3Text?: string;
+	button3Value?: string;
+
+	[key: string]: any;
 }
 
 export interface GhlPlatformMessage {

@@ -971,7 +971,7 @@ export class CustomPageController {
 				  ...options,
 				  headers: {
 					...options.headers,
-					'X-GHL-Context': this.encryptedUserData, // Include encrypted data
+					'X-GHL-Context': this.encryptedUserData,
 					'Content-Type': 'application/json',
 				  },
 				});

@@ -8,7 +8,7 @@ import {
 	IntegrationError,
 	NotFoundError,
 	Settings, StateInstanceWebhook,
-	WaSettings, SendResponse,
+	WaSettings, SendResponse, SendInteractiveButtonsReply, formatPhoneNumber,
 } from "@green-api/greenapi-integration";
 import { GhlTransformer } from "./ghl.transformer";
 import { PrismaService } from "../prisma/prisma.service";
@@ -20,8 +20,9 @@ import {
 	GhlContactUpsertRequest,
 	GhlContactUpsertResponse,
 	GhlPlatformMessage,
-	MessageStatusPayload,
+	MessageStatusPayload, WorkflowActionData, WorkflowActionResult,
 } from "../types";
+import { SendInteractiveButtons } from "@green-api/greenapi-integration/dist/types/types";
 
 @Injectable()
 export class GhlService extends BaseAdapter<
@@ -236,6 +237,47 @@ export class GhlService extends BaseAdapter<
 				error.response?.status || 500,
 				error.response?.data,
 			);
+		}
+	}
+
+	public async postOutboundMessageToGhl(
+		locationId: string,
+		contactId: string,
+		messageContent: string,
+		attachments?: string[],
+	): Promise<void> {
+		const httpClient = await this.createPlatformClient(locationId);
+		const payload: any = {
+			type: "Custom",
+			contactId,
+			message: messageContent + "\f\f\f\f\f",
+			conversationProviderId: this.configService.get<string>("GHL_CONVERSATION_PROVIDER_ID")!,
+		};
+
+		this.gaLogger.info(`Posting outbound message to GHL for contact ${contactId}`, payload);
+
+		if (attachments && attachments.length > 0) {
+			payload.attachments = attachments;
+		}
+
+		try {
+			const {data: msgRes} = await httpClient.post("/conversations/messages", payload);
+			this.gaLogger.info(`Successfully posted outbound message to GHL for contact ${contactId}`, msgRes);
+
+			const messageId = msgRes.messageId;
+
+			try {
+				await this.updateGhlMessageStatus(locationId, messageId, "read");
+				this.gaLogger.info(`Updated GHL message status to delivered`, {messageId});
+			} catch (statusError) {
+				this.gaLogger.warn(`Failed to update GHL message status, but message was posted successfully`, {
+					messageId,
+					error: statusError.message,
+				});
+			}
+		} catch (error) {
+			this.gaLogger.error(`Error posting outbound GHL message for contact ${contactId}`, error);
+			throw error;
 		}
 	}
 
@@ -527,5 +569,227 @@ export class GhlService extends BaseAdapter<
 			this.gaLogger.error(`Failed to create Green API instance ${idInstance} for User ${ghlUserId}: ${error.message}`, error.stack);
 			throw new IntegrationError("Failed to create instance", "INSTANCE_CREATION_ERROR", 500);
 		}
+	}
+
+	public async handleWorkflowAction(
+		locationId: string,
+		contactPhone: string,
+		data: WorkflowActionData,
+		actionType: "message" | "file" | "interactive-buttons" | "reply-buttons",
+	): Promise<WorkflowActionResult> {
+		this.gaLogger.info(`Processing ${actionType} workflow action for location ${locationId}`, {
+			instanceId: data.instanceId,
+			actionType,
+		});
+
+		const instance = await this.prisma.getInstance(BigInt(data.instanceId));
+		if (!instance) {
+			throw new Error(`Instance ${data.instanceId} not found`);
+		}
+		if (!instance.user || instance.userId !== locationId) {
+			throw new Error(`Instance ${data.instanceId} does not belong to location ${locationId}`);
+		}
+		if (instance.stateInstance !== "authorized") {
+			throw new Error(`Instance ${data.instanceId} is not authorized (state: ${instance.stateInstance})`);
+		}
+
+		const chatId = formatPhoneNumber(contactPhone);
+		const cleanPhone = chatId.replace("@c.us", "");
+		const greenApiClient = this.createGreenApiClient(instance);
+
+		let sendResponse: SendResponse;
+		let ghlMessageContent: string;
+		let ghlAttachments: string[] | undefined;
+
+		switch (actionType) {
+			case "message":
+				if (!data.message) throw new Error("Message is required");
+				sendResponse = await greenApiClient.sendMessage({
+					chatId,
+					message: data.message,
+					linkPreview: true,
+				});
+				ghlMessageContent = data.message;
+				this.gaLogger.info(`Text message sent via GREEN-API`, {
+					instanceId: data.instanceId,
+					messageId: sendResponse.idMessage,
+				});
+				break;
+
+			case "file":
+				if (!data.url || !data.fileName) throw new Error("URL and fileName are required for file messages");
+				sendResponse = await greenApiClient.sendFileByUrl({
+					chatId,
+					file: {url: data.url, fileName: data.fileName},
+					caption: data.caption || undefined,
+				});
+				ghlMessageContent = data.caption ? `${data.caption} [File: ${data.fileName}]` : `[File: ${data.fileName}]`;
+				ghlAttachments = [data.url];
+				this.gaLogger.info(`File sent via GREEN-API`, {
+					instanceId: data.instanceId,
+					messageId: sendResponse.idMessage,
+					fileName: data.fileName,
+				});
+				break;
+
+			case "interactive-buttons":
+				if (!data.body) throw new Error("Body is required for interactive buttons");
+				const buttons = this.buildInteractiveButtons(data);
+				if (buttons.length === 0) throw new Error("At least one button is required");
+
+				sendResponse = await greenApiClient.sendInteractiveButtons({
+					chatId,
+					header: data.header,
+					body: data.body,
+					footer: data.footer,
+					buttons,
+				});
+				ghlMessageContent = this.formatInteractiveButtonsForGhl(data, buttons);
+				this.gaLogger.info(`Interactive buttons sent via GREEN-API`, {
+					instanceId: data.instanceId,
+					messageId: sendResponse.idMessage,
+					buttonCount: buttons.length,
+				});
+				break;
+
+			case "reply-buttons":
+				if (!data.body) throw new Error("Body is required for reply buttons");
+				const replyButtons = this.buildReplyButtons(data);
+				if (replyButtons.length === 0) throw new Error("At least one button is required");
+
+				sendResponse = await greenApiClient.sendInteractiveButtonsReply({
+					chatId,
+					header: data.header,
+					body: data.body,
+					footer: data.footer,
+					buttons: replyButtons,
+				});
+				ghlMessageContent = this.formatReplyButtonsForGhl(data, replyButtons);
+				this.gaLogger.info(`Reply buttons sent via GREEN-API`, {
+					instanceId: data.instanceId,
+					messageId: sendResponse.idMessage,
+					buttonCount: replyButtons.length,
+				});
+				break;
+
+			default:
+				throw new Error(`Unsupported action type: ${actionType}`);
+		}
+
+		const ghlContact = await this.getGhlContact(locationId, cleanPhone);
+		if (!ghlContact) {
+			this.gaLogger.warn(`Could not find/create GHL contact for phone ${cleanPhone}`);
+			return {
+				success: true,
+				messageId: sendResponse.idMessage,
+				warning: `${actionType} sent but contact not found in GHL`,
+			};
+		}
+
+		await this.postOutboundMessageToGhl(locationId, ghlContact.id, ghlMessageContent, ghlAttachments);
+
+		this.gaLogger.info(`Outbound ${actionType} posted to GHL conversation`, {
+			contactId: ghlContact.id,
+			locationId,
+		});
+
+		return {
+			success: true,
+			messageId: sendResponse.idMessage,
+			contactId: ghlContact.id,
+		};
+	}
+
+	private buildInteractiveButtons(data: WorkflowActionData): Array<{
+		type: "copy" | "call" | "url";
+		buttonId: string;
+		buttonText: string;
+		copyCode?: string;
+		phoneNumber?: string;
+		url?: string;
+	}> {
+		const buttons: SendInteractiveButtons["buttons"] = [];
+
+		if (data.button1Type && data.button1Text && data.button1Value) {
+			buttons.push({
+				type: data.button1Type as "copy" | "call" | "url",
+				buttonId: "1",
+				buttonText: data.button1Text,
+				...(data.button1Type === "copy" && {copyCode: data.button1Value}),
+				...(data.button1Type === "call" && {phoneNumber: data.button1Value}),
+				...(data.button1Type === "url" && {url: data.button1Value}),
+			});
+		}
+
+		if (data.button2Type && data.button2Text && data.button2Value) {
+			buttons.push({
+				type: data.button2Type as "copy" | "call" | "url",
+				buttonId: "2",
+				buttonText: data.button2Text,
+				...(data.button2Type === "copy" && {copyCode: data.button2Value}),
+				...(data.button2Type === "call" && {phoneNumber: data.button2Value}),
+				...(data.button2Type === "url" && {url: data.button2Value}),
+			});
+		}
+
+		if (data.button3Type && data.button3Text && data.button3Value) {
+			buttons.push({
+				type: data.button3Type as "copy" | "call" | "url",
+				buttonId: "3",
+				buttonText: data.button3Text,
+				...(data.button3Type === "copy" && {copyCode: data.button3Value}),
+				...(data.button3Type === "call" && {phoneNumber: data.button3Value}),
+				...(data.button3Type === "url" && {url: data.button3Value}),
+			});
+		}
+
+		return buttons;
+	}
+
+	private buildReplyButtons(data: WorkflowActionData): Array<{
+		buttonId: string;
+		buttonText: string;
+	}> {
+		const buttons: SendInteractiveButtonsReply["buttons"] = [];
+
+		if (data.button1Text) {
+			buttons.push({buttonId: "1", buttonText: data.button1Text});
+		}
+		if (data.button2Text) {
+			buttons.push({buttonId: "2", buttonText: data.button2Text});
+		}
+		if (data.button3Text) {
+			buttons.push({buttonId: "3", buttonText: data.button3Text});
+		}
+
+		return buttons;
+	}
+
+	private formatInteractiveButtonsForGhl(data: WorkflowActionData, buttons: any[]): string {
+		const buttonsList = buttons.map(btn => {
+			let buttonDesc = `• ${btn.buttonText}`;
+			if (btn.type === "url" && btn.url) buttonDesc += ` (${btn.url})`;
+			else if (btn.type === "call" && btn.phoneNumber) buttonDesc += ` (📞 ${btn.phoneNumber})`;
+			else if (btn.type === "copy" && btn.copyCode) buttonDesc += ` (📋 ${btn.copyCode})`;
+			return buttonDesc;
+		}).join("\n");
+
+		return [
+			data.header && `${data.header}`,
+			data.body,
+			data.footer && `${data.footer}`,
+			`\nButtons:\n${buttonsList}`,
+		].filter(Boolean).join("\n");
+	}
+
+	private formatReplyButtonsForGhl(data: WorkflowActionData, buttons: any[]): string {
+		const buttonsList = buttons.map(btn => `• ${btn.buttonText}`).join("\n");
+
+		return [
+			data.header && `${data.header}`,
+			data.body,
+			data.footer && `${data.footer}`,
+			`\nReply options:\n${buttonsList}`,
+		].filter(Boolean).join("\n");
 	}
 }
