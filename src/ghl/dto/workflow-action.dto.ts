@@ -1,4 +1,4 @@
-import { IsObject } from "class-validator";
+import { IsBoolean, IsObject } from "class-validator";
 
 export class WorkflowActionDto {
 	@IsObject()
@@ -20,4 +20,6 @@ export class WorkflowActionDto {
 		version: string;
 		[key: string]: any;
 	};
+	@IsBoolean()
+	isMarketplaceAction: boolean;
 }

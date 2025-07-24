@@ -1,4 +1,4 @@
-import { Injectable, HttpException, HttpStatus } from "@nestjs/common";
+import { Injectable, HttpException, HttpStatus, BadRequestException } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import axios, { AxiosInstance, AxiosError } from "axios";
 import {
@@ -266,15 +266,17 @@ export class GhlService extends BaseAdapter<
 
 			const messageId = msgRes.messageId;
 
-			try {
-				await this.updateGhlMessageStatus(locationId, messageId, "read");
-				this.gaLogger.info(`Updated GHL message status to delivered`, {messageId});
-			} catch (statusError) {
-				this.gaLogger.warn(`Failed to update GHL message status, but message was posted successfully`, {
-					messageId,
-					error: statusError.message,
-				});
-			}
+			setTimeout(async () => {
+				try {
+					await this.updateGhlMessageStatus(locationId, messageId, "delivered");
+					this.gaLogger.info(`Updated GHL message status to delivered`, {messageId});
+				} catch (statusError) {
+					this.gaLogger.warn(`Failed to update GHL message status, but message was posted successfully`, {
+						messageId,
+						error: statusError.message,
+					});
+				}
+			}, 5000);
 		} catch (error) {
 			this.gaLogger.error(`Error posting outbound GHL message for contact ${contactId}`, error);
 			throw error;
@@ -584,13 +586,24 @@ export class GhlService extends BaseAdapter<
 
 		const instance = await this.prisma.getInstance(BigInt(data.instanceId));
 		if (!instance) {
-			throw new Error(`Instance ${data.instanceId} not found`);
+			this.gaLogger.error(`Instance ${data.instanceId} not found`, {data, locationId, contactPhone});
+			throw new BadRequestException(`Instance ${data.instanceId} not found`);
 		}
 		if (!instance.user || instance.userId !== locationId) {
-			throw new Error(`Instance ${data.instanceId} does not belong to location ${locationId}`);
+			this.gaLogger.error(`Instance ${data.instanceId} does not belong to location ${locationId}`, {
+				data,
+				locationId,
+				contactPhone,
+			});
+			throw new BadRequestException(`Instance ${data.instanceId} does not belong to location ${locationId}`);
 		}
 		if (instance.stateInstance !== "authorized") {
-			throw new Error(`Instance ${data.instanceId} is not authorized (state: ${instance.stateInstance})`);
+			this.gaLogger.error(`Instance ${data.instanceId} is not authorized (state: ${instance.stateInstance})`, {
+				data,
+				locationId,
+				contactPhone,
+			});
+			throw new BadRequestException(`Instance ${data.instanceId} is not authorized (state: ${instance.stateInstance})`);
 		}
 
 		const chatId = formatPhoneNumber(contactPhone);
@@ -623,7 +636,7 @@ export class GhlService extends BaseAdapter<
 					file: {url: data.url, fileName: data.fileName},
 					caption: data.caption || undefined,
 				});
-				ghlMessageContent = data.caption ? `${data.caption} [File: ${data.fileName}]` : `[File: ${data.fileName}]`;
+				ghlMessageContent = data.caption ? data.caption : `[File: ${data.fileName}]`;
 				ghlAttachments = [data.url];
 				this.gaLogger.info(`File sent via GREEN-API`, {
 					instanceId: data.instanceId,
