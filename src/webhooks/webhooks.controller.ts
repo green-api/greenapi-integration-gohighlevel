@@ -77,7 +77,6 @@ export class WebhooksController {
 			);
 
 			res.status(HttpStatus.OK).json(result);
-
 		} catch (error) {
 			this.logger.error(`Error processing workflow action`, error);
 			if (error instanceof BadRequestException) {

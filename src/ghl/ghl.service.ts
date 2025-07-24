@@ -580,8 +580,9 @@ export class GhlService extends BaseAdapter<
 		actionType: "message" | "file" | "interactive-buttons" | "reply-buttons",
 	): Promise<WorkflowActionResult> {
 		this.gaLogger.info(`Processing ${actionType} workflow action for location ${locationId}`, {
-			instanceId: data.instanceId,
 			actionType,
+			contactPhone,
+			data,
 		});
 
 		const instance = await this.prisma.getInstance(BigInt(data.instanceId));
@@ -704,6 +705,8 @@ export class GhlService extends BaseAdapter<
 		this.gaLogger.info(`Outbound ${actionType} posted to GHL conversation`, {
 			contactId: ghlContact.id,
 			locationId,
+			data,
+			contactPhone,
 		});
 
 		return {
