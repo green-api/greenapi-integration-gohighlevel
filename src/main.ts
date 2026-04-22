@@ -15,7 +15,7 @@ declare global {
 async function bootstrap() {
 	const app = await NestFactory.create(AppModule, {});
 	app.useGlobalFilters(new ValidationExceptionFilter());
-	app.useGlobalPipes(new ValidationPipe({whitelist: true, transform: true, forbidNonWhitelisted: true}));
+	app.useGlobalPipes(new ValidationPipe({whitelist: true, transform: true}));
 	app.use(helmet());
 	app.enableShutdownHooks();
 	await app.listen(3000);

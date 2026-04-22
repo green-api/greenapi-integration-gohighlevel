@@ -33,6 +33,26 @@ export class GhlService extends BaseAdapter<
 > {
 	private readonly ghlApiBaseUrl = "https://services.leadconnectorhq.com";
 	private readonly ghlApiVersion = "2021-07-28";
+	private readonly selfPostedMessageTtlMs = 10 * 60 * 1000;
+	private readonly selfPostedMessageIds = new Map<string, number>();
+
+	public wasRecentlyPostedByUs(messageId: string): boolean {
+		if (!messageId) return false;
+		this.pruneSelfPostedMessageIds();
+		return this.selfPostedMessageIds.has(messageId);
+	}
+
+	private markSelfPosted(messageId: string): void {
+		if (!messageId) return;
+		this.selfPostedMessageIds.set(messageId, Date.now() + this.selfPostedMessageTtlMs);
+	}
+
+	private pruneSelfPostedMessageIds(): void {
+		const now = Date.now();
+		for (const [id, expiresAt] of this.selfPostedMessageIds) {
+			if (expiresAt <= now) this.selfPostedMessageIds.delete(id);
+		}
+	}
 
 	constructor(
 		protected readonly ghlTransformer: GhlTransformer,
@@ -250,7 +270,7 @@ export class GhlService extends BaseAdapter<
 		const payload: any = {
 			type: "Custom",
 			contactId,
-			message: messageContent + "\f\f\f\f\f",
+			message: messageContent,
 			conversationProviderId: this.configService.get<string>("GHL_CONVERSATION_PROVIDER_ID")!,
 		};
 
@@ -265,6 +285,7 @@ export class GhlService extends BaseAdapter<
 			this.gaLogger.info(`Successfully posted outbound message to GHL for contact ${contactId}`, msgRes);
 
 			const messageId = msgRes.messageId;
+			this.markSelfPosted(messageId);
 
 			setTimeout(async () => {
 				try {

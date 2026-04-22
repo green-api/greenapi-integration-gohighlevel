@@ -101,12 +101,12 @@ export class WebhooksController {
 		const locationId = ghlWebhook.locationId;
 		const messageId = ghlWebhook.messageId;
 		try {
+			if (messageId && this.ghlService.wasRecentlyPostedByUs(messageId)) {
+				this.logger.info(`Skipping echo of self-posted message ${messageId} for location ${locationId}`);
+				res.status(HttpStatus.OK).send();
+				return;
+			}
 			if (!ghlWebhook.userId) {
-				if (ghlWebhook.message && ghlWebhook.message.endsWith("\f\f\f\f\f")) {
-					this.logger.info(`Skipping workflow message with marker for location ${locationId}`);
-					res.status(HttpStatus.OK).send();
-					return;
-				}
 				this.logger.info(`Processing message without userId (likely bot message) for location ${locationId}`);
 			}
 			const conversationProviderId = ghlWebhook.conversationProviderId === this.configService.get("GHL_CONVERSATION_PROVIDER_ID");
@@ -119,6 +119,21 @@ export class WebhooksController {
 			if (!locationId) {
 				this.logger.error("GHL Location ID is missing", ghlWebhook);
 				throw new BadRequestException("Location ID is missing");
+			}
+			if (ghlWebhook.type !== "SMS") {
+				this.logger.log(`Ignoring GHL webhook type ${ghlWebhook.type}.`);
+				res.status(HttpStatus.OK).send();
+				return;
+			}
+			if (!ghlWebhook.phone) {
+				this.logger.warn(`GHL SMS webhook missing phone, cannot route to WhatsApp`, ghlWebhook);
+				res.status(HttpStatus.OK).send();
+				return;
+			}
+			if (!ghlWebhook.message && (!ghlWebhook.attachments || ghlWebhook.attachments.length === 0)) {
+				this.logger.warn(`GHL SMS webhook has no message and no attachments, skipping`, ghlWebhook);
+				res.status(HttpStatus.OK).send();
+				return;
 			}
 			let instanceId: string | bigint | null = null;
 			const contact = await this.ghlService.getGhlContact(locationId, ghlWebhook.phone);
@@ -154,11 +169,7 @@ export class WebhooksController {
 			}
 
 			res.status(HttpStatus.OK).send();
-			if (ghlWebhook.type === "SMS" && (ghlWebhook.message || (ghlWebhook.attachments && ghlWebhook.attachments.length > 0))) {
-				await this.ghlService.handlePlatformWebhook(ghlWebhook, BigInt(instanceId));
-			} else {
-				this.logger.log(`Ignoring GHL webhook type ${ghlWebhook.type}.`);
-			}
+			await this.ghlService.handlePlatformWebhook(ghlWebhook, BigInt(instanceId));
 		} catch (error) {
 			this.logger.error(`Error processing GHL webhook for location ${locationId}`, error);
 			if (locationId && messageId) {

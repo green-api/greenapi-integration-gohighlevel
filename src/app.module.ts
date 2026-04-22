@@ -10,7 +10,7 @@ import { CustomPageModule } from './custom-page/custom-page.module';
 @Module({
     imports: [
         ConfigModule.forRoot({
-            isGlobal: true, envFilePath: '.env', cache: true,
+            isGlobal: true, envFilePath: '.env',
         }),
         PrismaModule,
         GhlModule,

@@ -2,7 +2,8 @@ import { IsString, IsArray, IsNotEmpty, IsOptional } from "class-validator";
 
 export class GhlWebhookDto {
 	@IsString()
-	contactId: string;
+	@IsOptional()
+	contactId?: string;
 
 	@IsString()
 	locationId: string;
@@ -15,25 +16,31 @@ export class GhlWebhookDto {
 	type: string;
 
 	@IsString()
-	phone: string;
-
-	@IsString()
-	message: string;
-
-	@IsArray()
-	@IsString({each: true})
-	attachments: string[];
+	@IsOptional()
+	phone?: string;
 
 	@IsString()
 	@IsOptional()
-	userId: string;
+	message?: string;
+
+	@IsArray()
+	@IsString({each: true})
+	@IsOptional()
+	attachments?: string[];
 
 	@IsString()
-	conversationId: string;
+	@IsOptional()
+	userId?: string;
 
 	@IsString()
+	@IsOptional()
+	conversationId?: string;
+
+	@IsString()
+	@IsOptional()
 	customUserId?: string;
 
 	@IsString()
+	@IsOptional()
 	conversationProviderId?: string;
 }
