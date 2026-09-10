@@ -1,4 +1,26 @@
 import { User } from ".prisma/client";
+import { GreenApiWebhook, MessageWebhook, WebhookType } from "@green-api/greenapi-integration";
+
+/**
+ * GREEN-API webhook types that carry an actual WhatsApp message.
+ * `outgoingMessageReceived` is emitted for messages sent from the phone itself,
+ * `outgoingAPIMessageReceived` for messages sent through the API (by us or any other integration).
+ */
+export const MESSAGE_WEBHOOK_TYPES = [
+	"incomingMessageReceived",
+	"outgoingMessageReceived",
+	"outgoingAPIMessageReceived",
+] as const satisfies readonly WebhookType[];
+
+export function isMessageWebhook(webhook: GreenApiWebhook): webhook is MessageWebhook {
+	return (MESSAGE_WEBHOOK_TYPES as readonly string[]).includes(webhook.typeWebhook);
+}
+
+/** Plain boolean on purpose: a type predicate here would narrow `webhook` to `never` in else-branches. */
+export function isOutgoingMessageWebhook(webhook: GreenApiWebhook): boolean {
+	return webhook.typeWebhook === "outgoingMessageReceived"
+		|| webhook.typeWebhook === "outgoingAPIMessageReceived";
+}
 
 interface GhlPlatformAttachment {
 	url: string;
@@ -85,10 +107,11 @@ export interface GhlPlatformMessage {
 	contactId: string;
 	locationId: string;
 	message: string;
-	direction: "inbound";
+	direction: "inbound" | "outbound";
 	conversationProviderId?: string;
 	attachments?: GhlPlatformAttachment[];
 	timestamp?: Date;
+	greenApiMessageId?: string;
 }
 
 export type UserCreateData = Omit<User, "createdAt" | "instance"> & { id: string };
