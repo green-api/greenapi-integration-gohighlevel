@@ -184,6 +184,10 @@ export interface GhlContactUpsertRequest {
 	dnd?: boolean;
 	dndSettings?: GhlDndSettings;
 	inboundDndSettings?: GhlInboundDndSettings;
+	/**
+	 * Replaces the contact's entire tag list, so it is only safe to send while creating a
+	 * contact. Use `POST /contacts/{contactId}/tags` to add tags to an existing one.
+	 */
 	tags?: string[];
 	customFields?: GhlCustomField[];
 	source?: string;
@@ -236,4 +240,22 @@ export interface GhlContactUpsertResponse {
 	new: boolean;
 	contact: GhlContact;
 	traceId: string;
+}
+
+/**
+ * Answer of `GET /contacts/search/duplicate`. The endpoint is documented without a response
+ * schema, so the bare contact is accepted alongside the wrapped shape.
+ */
+export interface GhlDuplicateContactResponse {
+	contact?: GhlContact | null;
+}
+
+
+/**
+ * Outcome of a contact lookup. "unknown" means the question could not be answered - a caller that
+ * is about to write must not mistake it for "the contact does not exist".
+ */
+export interface GhlContactLookup {
+	status: "found" | "missing" | "unknown";
+	contact: GhlContact | null;
 }

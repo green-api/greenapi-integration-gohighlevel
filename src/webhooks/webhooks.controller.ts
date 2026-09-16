@@ -7,7 +7,9 @@ import {
 	HttpStatus, Res, BadRequestException,
 	Headers,
 } from "@nestjs/common";
-import { GhlService } from "../ghl/ghl.service";
+import { GhlService, INSTANCE_TAG_PREFIX } from "../ghl/ghl.service";
+import type { Instance } from "@prisma/client";
+import { GhlContact } from "../types";
 import { GreenApiLogger, GreenApiWebhook } from "@green-api/greenapi-integration";
 import { GhlWebhookDto } from "../ghl/dto/ghl-webhook.dto";
 import { GreenApiWebhookGuard } from "./guards/greenapi-webhook.guard";
@@ -142,32 +144,32 @@ export class WebhooksController {
 				res.status(HttpStatus.OK).send();
 				return;
 			}
+			const instances = await this.prisma.getInstancesByUserId(locationId);
+			if (instances.length === 0) {
+				this.logger.error(`No instances found for location ${locationId}`);
+				res.status(HttpStatus.OK).send();
+				return;
+			}
+
 			let instanceId: string | bigint | null = null;
-			const contact = await this.ghlService.getGhlContact(locationId, ghlWebhook.phone);
+			const contact = await this.resolveRoutingContact(locationId, ghlWebhook);
 			if (contact?.tags) {
-				instanceId = this.extractInstanceIdFromTags(contact.tags);
+				instanceId = this.selectInstanceIdFromTags(contact.tags, instances);
 				if (instanceId) {
 					this.logger.log(`Found instance ID from tags: ${instanceId}`);
 				}
 			}
 			if (!instanceId) {
 				this.logger.warn(
-					`WhatsApp instance ID not found in contact custom fields for phone ${ghlWebhook.phone}, falling back to location instances`,
+					`WhatsApp instance ID not found in contact tags for phone ${ghlWebhook.phone}, falling back to location instances`,
 					{ghlWebhook, contact},
 				);
 
-				const instances = await this.prisma.getInstancesByUserId(locationId);
-
-				if (instances.length === 0) {
-					this.logger.error(`No instances found for location ${locationId}`);
-					res.status(HttpStatus.OK).send();
-					return;
-				}
 				if (instances.length === 1) {
 					this.logger.log(`Using single instance ${instances[0].idInstance} for location ${locationId}`);
 					instanceId = instances[0].idInstance;
 				} else {
-					const oldestInstance = instances.sort((a, b) =>
+					const oldestInstance = [...instances].sort((a, b) =>
 						a.createdAt.getTime() - b.createdAt.getTime(),
 					)[0];
 					this.logger.warn(`Multiple instances found for location ${locationId}, using oldest: ${oldestInstance.idInstance}`);
@@ -197,13 +199,48 @@ export class WebhooksController {
 		}
 	}
 
-	private extractInstanceIdFromTags(tags: string[]): string | null {
-		if (!tags || tags.length === 0) return null;
+	/**
+	 * The contact id GHL sends with the webhook is the reliable way in: it covers group
+	 * conversations too, whose "phone" holds a WhatsApp group id rather than a number and which a
+	 * lookup by phone cannot resolve.
+	 */
+	private async resolveRoutingContact(locationId: string, ghlWebhook: GhlWebhookDto): Promise<GhlContact | null> {
+		if (ghlWebhook.contactId) {
+			const contact = await this.ghlService.getGhlContactById(locationId, ghlWebhook.contactId);
+			if (contact) return contact;
 
-		const instanceTag = tags.find(tag => tag.startsWith("whatsapp-instance-"));
-		if (instanceTag) {
-			return instanceTag.replace("whatsapp-instance-", "");
+			this.logger.warn(`GHL contact ${ghlWebhook.contactId} could not be read, falling back to a lookup by phone`);
 		}
-		return null;
+		if (!ghlWebhook.phone) return null;
+
+		return this.ghlService.getGhlContact(locationId, ghlWebhook.phone);
+	}
+
+	/**
+	 * Instance tags accumulate on a contact - they are added, never replaced - so a chat served by
+	 * several instances carries several of them, including tags of instances that have since been
+	 * deleted. Only instances this location still has are considered, and the oldest wins: the
+	 * same rule the fallback below uses, so routing stays predictable either way.
+	 */
+	private selectInstanceIdFromTags(tags: string[], instances: Instance[]): bigint | null {
+		const taggedIds = new Set(
+			tags
+				.filter(tag => tag.toLowerCase().startsWith(INSTANCE_TAG_PREFIX))
+				.map(tag => tag.slice(INSTANCE_TAG_PREFIX.length)),
+		);
+		if (taggedIds.size === 0) return null;
+
+		const tagged = instances.filter(instance => taggedIds.has(instance.idInstance.toString()));
+		if (tagged.length === 0) {
+			this.logger.warn(`Contact tags point at instances this location no longer has: ${[...taggedIds].join(", ")}`);
+			return null;
+		}
+		if (tagged.length > 1) {
+			const oldest = [...tagged].sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())[0];
+			this.logger.warn(`Contact is tagged with several instances (${tagged.map(instance => instance.idInstance).join(", ")}), using the oldest: ${oldest.idInstance}`);
+			return oldest.idInstance;
+		}
+
+		return tagged[0].idInstance;
 	}
 }
