@@ -124,6 +124,12 @@ Marketplace app:
     - `GHL_CONVERSATION_PROVIDER_ID`: From step 7 in the GHL app setup
     - `GHL_SHARED_SECRET`: From step 5 in the GHL app setup
 
+   Optional variables:
+
+    - `OUTGOING_API_ECHO_DELAY_MS` (default `3000`): how long the adapter waits before handling an
+      `outgoingAPIMessageReceived` notification. The delay gives the adapter's own sends time to be
+      registered, so they are not posted to GHL twice.
+
 4. **Apply database migrations:**
 
    ```bash
@@ -277,6 +283,26 @@ Once installed, the integration works automatically:
 2. Supported outgoing message types:
     - Text messages
     - File attachments
+
+### Messages Sent Outside GHL (Phone or Other Integrations → GHL)
+
+1. Messages that leave your WhatsApp number without GHL being involved are also added to the GHL
+   conversation, as outbound messages, so the conversation history in GHL stays complete:
+    - messages sent from the WhatsApp app on the phone (`outgoingMessageReceived`)
+    - messages sent through [GREEN-API](https://green-api.com/en) by any other application
+      (`outgoingAPIMessageReceived`)
+2. All message types listed for incoming messages are supported (text, media, location, contacts,
+   polls, buttons, edits, deletions, reactions and so on).
+3. WhatsApp delivery statuses (`outgoingMessageStatus`) are mirrored onto the matching GHL message,
+   so `delivered`, `read` and failures (`failed`, `noAccount`, `notInGroup`, `yellowCard`) are
+   visible in GHL.
+4. Messages the adapter itself sent (from the GHL interface or from a workflow action) are
+   recognised by their GREEN-API message ID and are never posted twice.
+5. This requires the `outgoingMessageWebhook`, `outgoingAPIMessageWebhook` and `outgoingWebhook`
+   notifications to be enabled on the instance. New instances get them right away, and existing
+   instances are brought up to date automatically when the adapter starts.
+   **Note:** enabling notifications reboots the GREEN-API instance, and the new settings are applied
+   within a few minutes.
 
 ### Important Note
 

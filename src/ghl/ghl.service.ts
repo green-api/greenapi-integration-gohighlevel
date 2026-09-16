@@ -1,4 +1,4 @@
-import { Injectable, HttpException, HttpStatus, BadRequestException } from "@nestjs/common";
+import { Injectable, HttpException, HttpStatus, BadRequestException, OnModuleInit } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import axios, { AxiosInstance, AxiosError } from "axios";
 import {
@@ -9,6 +9,7 @@ import {
 	NotFoundError,
 	Settings, StateInstanceWebhook,
 	WaSettings, SendResponse, SendInteractiveButtonsReply, formatPhoneNumber,
+	MessageWebhook, OutgoingMessageStatus, OutgoingMessageStatusWebhook,
 } from "@green-api/greenapi-integration";
 import { GhlTransformer } from "./ghl.transformer";
 import { PrismaService } from "../prisma/prisma.service";
@@ -20,9 +21,43 @@ import {
 	GhlContactUpsertRequest,
 	GhlContactUpsertResponse,
 	GhlPlatformMessage,
+	isMessageWebhook,
+	isOutgoingMessageWebhook,
 	MessageStatusPayload, WorkflowActionData, WorkflowActionResult,
 } from "../types";
 import { SendInteractiveButtons } from "@green-api/greenapi-integration/dist/types/types";
+
+/**
+ * Webhook notification types the integration relies on. Every GREEN-API instance managed by the
+ * app must have all of them enabled, otherwise messages sent from the phone or from another API
+ * consumer never reach the GHL conversation.
+ *
+ * - `outgoingWebhook` – statuses of sent messages (sent/delivered/read/failed)
+ * - `outgoingMessageWebhook` – messages sent from the phone itself
+ * - `outgoingAPIMessageWebhook` – messages sent through the API (by us or any other integration)
+ */
+export const REQUIRED_WEBHOOK_SETTINGS = {
+	incomingWebhook: "yes",
+	incomingCallWebhook: "yes",
+	stateWebhook: "yes",
+	outgoingWebhook: "yes",
+	outgoingMessageWebhook: "yes",
+	outgoingAPIMessageWebhook: "yes",
+} as const satisfies Settings;
+
+/**
+ * GHL only accepts pending/delivered/read/failed. GREEN-API statuses are mapped onto them and
+ * ranked so a late-arriving earlier status cannot roll a message back in the GHL UI.
+ */
+const GHL_STATUS_RANK: Record<"delivered" | "read", number> = {delivered: 1, read: 2};
+
+interface TrackedOutboundMessage {
+	locationId: string;
+	ghlMessageId?: string;
+	statusRank: number;
+	failed: boolean;
+	expiresAt: number;
+}
 
 @Injectable()
 export class GhlService extends BaseAdapter<
@@ -30,11 +65,19 @@ export class GhlService extends BaseAdapter<
 	GhlPlatformMessage,
 	User,
 	Instance
-> {
+> implements OnModuleInit {
 	private readonly ghlApiBaseUrl = "https://services.leadconnectorhq.com";
 	private readonly ghlApiVersion = "2021-07-28";
 	private readonly selfPostedMessageTtlMs = 10 * 60 * 1000;
 	private readonly selfPostedMessageIds = new Map<string, number>();
+	private readonly outboundMessageTtlMs = 24 * 60 * 60 * 1000;
+	private readonly outboundMessages = new Map<string, TrackedOutboundMessage>();
+	/**
+	 * Messages the integration sends itself come back as `outgoingAPIMessageReceived`. They are
+	 * registered as soon as GREEN-API answers the send request, but the notification can overtake
+	 * that bookkeeping, so echoes are inspected with a small delay.
+	 */
+	private readonly outgoingApiEchoDelayMs: number;
 
 	public wasRecentlyPostedByUs(messageId: string): boolean {
 		if (!messageId) return false;
@@ -54,12 +97,101 @@ export class GhlService extends BaseAdapter<
 		}
 	}
 
+	async onModuleInit(): Promise<void> {
+		// Instances created before outgoing notifications were supported still have them disabled
+		// on the GREEN-API side, so bring every stored instance up to date. Runs detached: a
+		// GREEN-API outage must not prevent the app from starting.
+			void this.syncInstancesWebhookSettings().catch(error => {
+			this.gaLogger.error(`Webhook settings sync failed: ${error.message}`, error.stack);
+		});
+	}
+
+	/**
+	 * Makes sure every stored instance has all notification types the integration needs enabled.
+	 * `setSettings` reboots the instance, so it is only called when something actually differs.
+	 */
+	public async syncInstancesWebhookSettings(): Promise<void> {
+		const instances = await this.prisma.getAllInstances();
+		this.gaLogger.info(`Checking webhook settings of ${instances.length} instance(s)`);
+
+		let updated = 0;
+		for (const instance of instances) {
+			try {
+				const client = this.createGreenApiClient(instance);
+				const remoteSettings = await client.getSettings();
+				const missing = Object.entries(REQUIRED_WEBHOOK_SETTINGS)
+					.filter(([key, value]) => remoteSettings[key as keyof Settings] !== value);
+
+				if (missing.length === 0) continue;
+
+				this.gaLogger.info(`Enabling missing notifications on instance ${instance.idInstance}`, {
+					missing: missing.map(([key]) => key),
+				});
+				await client.setSettings({...REQUIRED_WEBHOOK_SETTINGS});
+				await this.prisma.updateInstanceSettings(instance.idInstance, {
+					...(instance.settings || {}),
+					...REQUIRED_WEBHOOK_SETTINGS,
+				});
+				updated++;
+			} catch (error) {
+				this.gaLogger.warn(
+					`Could not sync webhook settings for instance ${instance.idInstance}: ${error.message}`,
+				);
+			}
+		}
+		this.gaLogger.info(`Webhook settings sync finished. Instances updated: ${updated}`);
+	}
+
+	/**
+	 * Remembers that a GREEN-API message already has a counterpart in a GHL conversation, so its
+	 * `outgoing*MessageReceived` echo is not posted twice and its status updates can be routed to
+	 * the right GHL message.
+	 */
+	private trackOutboundMessage(
+		idMessage: string | undefined,
+		locationId: string,
+		ghlMessageId?: string,
+		appliedStatus?: keyof typeof GHL_STATUS_RANK,
+	): void {
+		if (!idMessage) return;
+		this.pruneOutboundMessages();
+		const existing = this.outboundMessages.get(idMessage);
+		const statusRank = appliedStatus !== undefined ? GHL_STATUS_RANK[appliedStatus] : existing?.statusRank ?? -1;
+		this.outboundMessages.set(idMessage, {
+			locationId,
+			ghlMessageId: ghlMessageId ?? existing?.ghlMessageId,
+			statusRank,
+			failed: existing?.failed ?? false,
+			expiresAt: Date.now() + this.outboundMessageTtlMs,
+		});
+	}
+
+	/** Releases a reservation so a later notification for the same message can still reach GHL. */
+	private forgetOutboundMessage(idMessage: string | undefined): void {
+		if (idMessage) this.outboundMessages.delete(idMessage);
+	}
+
+	private isOutboundMessageTracked(idMessage: string | undefined): boolean {
+		if (!idMessage) return false;
+		this.pruneOutboundMessages();
+		return this.outboundMessages.has(idMessage);
+	}
+
+	private pruneOutboundMessages(): void {
+		const now = Date.now();
+		for (const [id, tracked] of this.outboundMessages) {
+			if (tracked.expiresAt <= now) this.outboundMessages.delete(id);
+		}
+	}
+
 	constructor(
 		protected readonly ghlTransformer: GhlTransformer,
 		protected readonly prisma: PrismaService,
 		private readonly configService: ConfigService,
 	) {
 		super(ghlTransformer, prisma);
+		const configuredDelay = Number(this.configService.get<string>("OUTGOING_API_ECHO_DELAY_MS"));
+		this.outgoingApiEchoDelayMs = Number.isFinite(configuredDelay) && configuredDelay >= 0 ? configuredDelay : 3000;
 	}
 
 	private async getHttpClient(ghlUserId: string): Promise<AxiosInstance> {
@@ -265,7 +397,7 @@ export class GhlService extends BaseAdapter<
 		contactId: string,
 		messageContent: string,
 		attachments?: string[],
-	): Promise<void> {
+	): Promise<string | undefined> {
 		const httpClient = await this.createPlatformClient(locationId);
 		const payload: any = {
 			type: "Custom",
@@ -298,21 +430,19 @@ export class GhlService extends BaseAdapter<
 					});
 				}
 			}, 5000);
+
+			return messageId;
 		} catch (error) {
 			this.gaLogger.error(`Error posting outbound GHL message for contact ${contactId}`, error);
 			throw error;
 		}
 	}
 
-	private async postInboundMessageToGhl(
+	private async getOrCreateGhlConversation(
+		httpClient: AxiosInstance,
 		ghlUserId: string,
 		contactId: string,
-		messageContent: string,
-		attachments: GhlPlatformMessage["attachments"],
-	): Promise<void> {
-		const httpClient = await this.getHttpClient(ghlUserId);
-		let conversationId: string;
-
+	): Promise<string> {
 		try {
 			const {data: search} = await httpClient.get("/conversations/search", {
 				params: {
@@ -322,49 +452,69 @@ export class GhlService extends BaseAdapter<
 				},
 			});
 			if (search.conversations?.length > 0) {
-				conversationId = search.conversations[0].id;
+				const conversationId = search.conversations[0].id;
 				this.gaLogger.log(`Found existing GHL conversation ${conversationId} for contact ${contactId} in Location ${ghlUserId}`);
-			} else {
-				this.gaLogger.log(`No existing GHL conversation for contact ${contactId} in Location ${ghlUserId}. Creating new one.`);
-				const {data: create} = await httpClient.post("/conversations/", {
-					locationId: ghlUserId,
-					contactId,
-				});
-				conversationId = create.conversation?.id ?? create.id;
-				if (!conversationId) {
-					this.gaLogger.error("Failed to get conversationId from create conversation response", create);
-					throw new Error("Failed to create or retrieve conversation ID.");
-				}
-				this.gaLogger.log(`Created new GHL conversation ${conversationId} for contact ${contactId} in Location ${ghlUserId}`);
+				return conversationId;
 			}
+
+			this.gaLogger.log(`No existing GHL conversation for contact ${contactId} in Location ${ghlUserId}. Creating new one.`);
+			const {data: create} = await httpClient.post("/conversations/", {
+				locationId: ghlUserId,
+				contactId,
+			});
+			const conversationId = create.conversation?.id ?? create.id;
+			if (!conversationId) {
+				this.gaLogger.error("Failed to get conversationId from create conversation response", create);
+				throw new Error("Failed to create or retrieve conversation ID.");
+			}
+			this.gaLogger.log(`Created new GHL conversation ${conversationId} for contact ${contactId} in Location ${ghlUserId}`);
+			return conversationId;
 		} catch (error) {
 			this.gaLogger.error(`Error during get/create GHL conversation for contact ${contactId} in Location ${ghlUserId}: ${error.message}`, error.response?.data);
 			throw error;
 		}
+	}
+
+	/**
+	 * Adds a message to a GHL conversation without asking GHL to deliver it.
+	 *
+	 * `direction: "outbound"` is what makes messages that were already sent over WhatsApp
+	 * (from the phone or by another API consumer) show up on the right-hand side of the GHL
+	 * conversation instead of being sent a second time.
+	 */
+	private async postMessageToGhlConversation(
+		ghlUserId: string,
+		contactId: string,
+		messageContent: string,
+		attachments: GhlPlatformMessage["attachments"],
+		direction: "inbound" | "outbound",
+	): Promise<{ conversationId: string; messageId?: string }> {
+		const httpClient = await this.getHttpClient(ghlUserId);
+		const conversationId = await this.getOrCreateGhlConversation(httpClient, ghlUserId, contactId);
 
 		const payload: any = {
 			type: "Custom",
 			conversationId,
 			message: messageContent,
-			direction: "inbound",
+			direction,
 			conversationProviderId: this.configService.get<string>("GHL_CONVERSATION_PROVIDER_ID"),
 		};
 
 		if (attachments && attachments.length > 0) {
 			payload.attachments = attachments.map(att => att.url);
-			this.gaLogger.warn(`Sending attachments to GHL for custom inbound. Payload (array of URLs):`, payload.attachments);
+			this.gaLogger.warn(`Sending attachments to GHL for custom ${direction} message. Payload (array of URLs):`, payload.attachments);
 		}
 
-		this.gaLogger.log(`Attempting to post inbound message to GHL for convo ${conversationId}. Payload:`, payload);
+		this.gaLogger.log(`Attempting to post ${direction} message to GHL for convo ${conversationId}. Payload:`, payload);
 		try {
 			const {data: msgRes} = await httpClient.post(
 				`/conversations/messages/inbound`,
 				payload,
 			);
-			this.gaLogger.log(`Successfully posted inbound message to GHL conversation ${conversationId}. Response:`, msgRes);
-			return msgRes;
+			this.gaLogger.log(`Successfully posted ${direction} message to GHL conversation ${conversationId}. Response:`, msgRes);
+			return {conversationId, messageId: msgRes?.messageId};
 		} catch (error) {
-			this.gaLogger.error(`Error posting inbound GHL message to convo ${conversationId}: ${error.message}. Payload sent:`, payload);
+			this.gaLogger.error(`Error posting ${direction} GHL message to convo ${conversationId}: ${error.message}. Payload sent:`, payload);
 			this.gaLogger.error("Error data:", error.response?.data);
 			throw error;
 		}
@@ -388,13 +538,21 @@ export class GhlService extends BaseAdapter<
 		ghlMessageDto.locationId = instance.userId;
 
 		try {
-			await this.postInboundMessageToGhl(
+			const {messageId} = await this.postMessageToGhlConversation(
 				instance.userId,
 				ghlMessageDto.contactId,
 				ghlMessageDto.message,
 				ghlMessageDto.attachments,
+				ghlMessageDto.direction,
 			);
-			this.gaLogger.log(`Message sent to GHL for contact ${ghlMessageDto.contactId} in User (Loc) ${instance.userId}.`);
+
+			if (ghlMessageDto.direction === "outbound") {
+				// GHL may echo the freshly added message back through the conversation provider
+				// webhook; skipping it there prevents the message from being sent to WhatsApp again.
+				if (messageId) this.markSelfPosted(messageId);
+				this.trackOutboundMessage(ghlMessageDto.greenApiMessageId, instance.userId, messageId);
+			}
+			this.gaLogger.log(`${ghlMessageDto.direction} message sent to GHL for contact ${ghlMessageDto.contactId} in User (Loc) ${instance.userId}.`);
 		} catch (error) {
 			this.gaLogger.error(`Failed to send message to GHL: ${error.message}`, error.stack);
 			throw error;
@@ -434,6 +592,10 @@ export class GhlService extends BaseAdapter<
 				this.gaLogger.error(`Unsupported Green API message type from GHL transform: ${transformedMessage.type}`);
 				throw new IntegrationError(`Invalid Green API message type: ${transformedMessage.type}`, "INVALID_MESSAGE_TYPE", 500);
 		}
+		// The message is already in the GHL conversation (GHL itself put it there), so its
+		// outgoingAPIMessageReceived echo must not be posted again; status notifications for it
+		// are routed to this GHL message.
+		this.trackOutboundMessage(gaResponse.idMessage, locationId, messageId, "delivered");
 		await this.updateGhlMessageStatus(locationId, messageId, "delivered");
 		return gaResponse;
 	}
@@ -443,7 +605,8 @@ export class GhlService extends BaseAdapter<
 		allowedTypes: WebhookType[],
 	): Promise<void> {
 		const idInstance = BigInt(webhook.instanceData.idInstance);
-		this.gaLogger.info(`Handling Green API webhook type: ${webhook.typeWebhook} for Instance: ${idInstance}`, webhook);
+		const webhookType: WebhookType = webhook.typeWebhook;
+		this.gaLogger.info(`Handling Green API webhook type: ${webhookType} for Instance: ${idInstance}`, webhook);
 		if (!allowedTypes.includes(webhook.typeWebhook)) {
 			this.gaLogger.warn(`Skipping Green API webhook: type ${webhook.typeWebhook} not in allowed: ${allowedTypes.join(", ")}`);
 			return;
@@ -459,37 +622,10 @@ export class GhlService extends BaseAdapter<
 		try {
 			if (webhook.typeWebhook === "stateInstanceChanged") {
 				await this.handleStateInstanceWebhook(webhook);
-			} else if (webhook.typeWebhook === "incomingMessageReceived") {
-				const isGroup = webhook.senderData?.chatId?.endsWith("@g.us") || false;
-
-				const contactIdentifier = webhook.senderData.chatId.replace(/@[cg]\.us$/, "");
-				let contactName: string;
-				let logContext: string;
-
-				if (isGroup) {
-					contactName = webhook.senderData.chatName || "Unknown Group";
-					logContext = `group "${contactName}" (${contactIdentifier}) sent by ${webhook.senderData.senderName || "Unknown"}`;
-				} else {
-					contactName = webhook.senderData.senderName || webhook.senderData.senderContactName || `WhatsApp ${contactIdentifier}`;
-					logContext = `individual ${contactName} (${contactIdentifier})`;
-				}
-
-				this.gaLogger.log(`Processing message from ${logContext}`);
-
-				const ghlContact = await this.findOrCreateGhlContact(
-					instanceWithUser.userId,
-					contactIdentifier,
-					contactName,
-					webhook.instanceData.idInstance.toString(),
-					isGroup,
-				);
-				if (!ghlContact?.id) throw new IntegrationError("Failed to resolve GHL contact.", "GHL_API_ERROR");
-
-				const transformedMsg = this.ghlTransformer.toPlatformMessage(webhook);
-				transformedMsg.contactId = ghlContact.id;
-				transformedMsg.locationId = instanceWithUser.userId;
-
-				await this.sendToPlatform(transformedMsg, instanceWithUser);
+			} else if (isMessageWebhook(webhook)) {
+				await this.handleMessageWebhook(webhook, instanceWithUser);
+			} else if (webhook.typeWebhook === "outgoingMessageStatus") {
+				await this.handleOutgoingMessageStatus(webhook);
 			} else if (webhook.typeWebhook === "incomingCall") {
 				const callerPhoneRaw = webhook.from;
 				const normalizedPhone = callerPhoneRaw.split("@")[0];
@@ -509,12 +645,171 @@ export class GhlService extends BaseAdapter<
 
 				await this.sendToPlatform(transformedCallMsg, instanceWithUser);
 			} else {
-				this.gaLogger.warn(`Unhandled allowed Green API webhook type: ${webhook.typeWebhook}`);
+				this.gaLogger.warn(`Unhandled allowed Green API webhook type: ${webhookType}`);
 			}
 		} catch (error) {
-			this.gaLogger.error(`Error in handleGreenApiWebhook for instance ${idInstance}, type ${webhook.typeWebhook}: ${error.message}`, error.stack);
+			this.gaLogger.error(`Error in handleGreenApiWebhook for instance ${idInstance}, type ${webhookType}: ${error.message}`, error.stack);
 			throw new IntegrationError("Failed to handle Green API webhook", "GA_WEBHOOK_ERROR", 500);
 		}
+	}
+
+	/**
+	 * Handles every notification that carries a WhatsApp message: incoming ones, messages sent
+	 * from the phone (`outgoingMessageReceived`) and messages sent through the API by us or by
+	 * another integration (`outgoingAPIMessageReceived`). Outgoing ones are added to the GHL
+	 * conversation as outbound messages so they are visible in the GHL interface.
+	 */
+	private async handleMessageWebhook(
+		webhook: MessageWebhook,
+		instanceWithUser: Instance & { user: User },
+	): Promise<void> {
+		const isOutgoing = isOutgoingMessageWebhook(webhook);
+		const chatId = webhook.senderData?.chatId;
+
+		if (!chatId) {
+			this.gaLogger.warn(`Skipping ${webhook.typeWebhook} without chatId`, webhook.senderData);
+			return;
+		}
+		// Broadcasts, statuses and channels (status@broadcast, *@newsletter, ...) have no GHL counterpart.
+		if (!/@[cg]\.us$/.test(chatId)) {
+			this.gaLogger.info(`Skipping ${webhook.typeWebhook} for non-chat recipient ${chatId}`);
+			return;
+		}
+
+		if (isOutgoing) {
+			if (webhook.typeWebhook === "outgoingAPIMessageReceived" && this.outgoingApiEchoDelayMs > 0) {
+				await this.delay(this.outgoingApiEchoDelayMs);
+			}
+			if (this.isOutboundMessageTracked(webhook.idMessage)) {
+				this.gaLogger.info(
+					`Skipping ${webhook.typeWebhook} ${webhook.idMessage}: already present in GHL conversation`,
+				);
+				return;
+			}
+			// Reserve the id before any awaits so a duplicated notification cannot post it twice.
+			this.trackOutboundMessage(webhook.idMessage, instanceWithUser.userId);
+		}
+
+		const isGroup = chatId.endsWith("@g.us");
+		const contactIdentifier = chatId.replace(/@[cg]\.us$/, "");
+		let contactName: string;
+		let logContext: string;
+
+		if (isGroup) {
+			contactName = webhook.senderData.chatName || "Unknown Group";
+			logContext = `group "${contactName}" (${contactIdentifier})`;
+		} else if (isOutgoing) {
+			// For outgoing notifications senderData describes the instance itself,
+			// the chat partner is in chatName.
+			contactName = webhook.senderData.chatName || `WhatsApp ${contactIdentifier}`;
+			logContext = `individual ${contactName} (${contactIdentifier})`;
+		} else {
+			contactName = webhook.senderData.senderName || webhook.senderData.senderContactName || `WhatsApp ${contactIdentifier}`;
+			logContext = `individual ${contactName} (${contactIdentifier})`;
+		}
+
+		this.gaLogger.log(
+			isOutgoing
+				? `Processing outgoing message (${webhook.typeWebhook}) to ${logContext}`
+				: `Processing message from ${logContext}${isGroup ? ` sent by ${webhook.senderData.senderName || "Unknown"}` : ""}`,
+		);
+
+		try {
+			const ghlContact = await this.findOrCreateGhlContact(
+				instanceWithUser.userId,
+				contactIdentifier,
+				contactName,
+				webhook.instanceData.idInstance.toString(),
+				isGroup,
+			);
+			if (!ghlContact?.id) throw new IntegrationError("Failed to resolve GHL contact.", "GHL_API_ERROR");
+
+			const transformedMsg = this.ghlTransformer.toPlatformMessage(webhook);
+			transformedMsg.contactId = ghlContact.id;
+			transformedMsg.locationId = instanceWithUser.userId;
+
+			await this.sendToPlatform(transformedMsg, instanceWithUser);
+		} catch (error) {
+			// Nothing reached the GHL conversation, so the reservation has to go: otherwise a repeated
+			// notification for this message would be dismissed as a duplicate that was never posted.
+			if (isOutgoing) this.forgetOutboundMessage(webhook.idMessage);
+			throw error;
+		}
+	}
+
+	/**
+	 * Mirrors WhatsApp delivery statuses onto the corresponding GHL message so the GHL interface
+	 * shows whether an outgoing message was delivered, read or failed.
+	 */
+	private async handleOutgoingMessageStatus(webhook: OutgoingMessageStatusWebhook): Promise<void> {
+		this.pruneOutboundMessages();
+		const tracked = this.outboundMessages.get(webhook.idMessage);
+
+		if (!tracked?.ghlMessageId) {
+			this.gaLogger.debug(
+				`No GHL message known for GREEN-API message ${webhook.idMessage}, ignoring status "${webhook.status}"`,
+			);
+			return;
+		}
+
+		const ghlStatus = this.mapGreenApiStatusToGhl(webhook.status);
+		if (!ghlStatus) {
+			this.gaLogger.debug(`Status "${webhook.status}" has no GHL counterpart, ignoring`);
+			return;
+		}
+
+		if (ghlStatus === "failed") {
+			if (tracked.failed) return;
+		} else if (tracked.failed || GHL_STATUS_RANK[ghlStatus] <= tracked.statusRank) {
+			this.gaLogger.debug(
+				`Ignoring status "${webhook.status}" for GHL message ${tracked.ghlMessageId}: not newer than the applied one`,
+			);
+			return;
+		}
+
+		try {
+			await this.updateGhlMessageStatus(
+				tracked.locationId,
+				tracked.ghlMessageId,
+				ghlStatus,
+				ghlStatus === "failed"
+					? {
+						code: webhook.status,
+						type: "delivery_failed",
+						message: webhook.description || `WhatsApp reported status "${webhook.status}"`,
+					}
+					: undefined,
+			);
+			if (ghlStatus === "failed") {
+				tracked.failed = true;
+			} else {
+				tracked.statusRank = GHL_STATUS_RANK[ghlStatus];
+			}
+		} catch (error) {
+			this.gaLogger.warn(
+				`Could not apply status "${webhook.status}" to GHL message ${tracked.ghlMessageId}: ${error.message}`,
+			);
+		}
+	}
+
+	private mapGreenApiStatusToGhl(status: OutgoingMessageStatus): "delivered" | "read" | "failed" | null {
+		switch (status) {
+			case "delivered":
+				return "delivered";
+			case "read":
+				return "read";
+			// "sent" is deliberately dropped: GHL's only equivalent is "pending", which would show
+			// an already sent message as still being in progress.
+			case "sent":
+				return null;
+			// failed, noAccount, notInGroup, yellowCard
+			default:
+				return "failed";
+		}
+	}
+
+	private delay(ms: number): Promise<void> {
+		return new Promise(resolve => setTimeout(resolve, ms));
 	}
 
 	public async handleStateInstanceWebhook(webhook: StateInstanceWebhook): Promise<void> {
@@ -562,9 +857,7 @@ export class GhlService extends BaseAdapter<
 		const settings: Settings = {
 			webhookUrl: `${appBaseUrl}/webhooks/green-api`,
 			webhookUrlToken: webhookToken,
-			incomingWebhook: "yes",
-			incomingCallWebhook: "yes",
-			stateWebhook: "yes",
+			...REQUIRED_WEBHOOK_SETTINGS,
 			wid: waSettings?.phone ? `${waSettings.phone}@c.us` : undefined,
 		};
 
@@ -711,17 +1004,31 @@ export class GhlService extends BaseAdapter<
 				throw new Error(`Unsupported action type: ${actionType}`);
 		}
 
-		const ghlContact = await this.getGhlContact(locationId, cleanPhone);
-		if (!ghlContact) {
-			this.gaLogger.warn(`Could not find/create GHL contact for phone ${cleanPhone}`);
-			return {
-				success: true,
-				messageId: sendResponse.idMessage,
-				warning: `${actionType} sent but contact not found in GHL`,
-			};
-		}
+		// Reserved before the GHL round trip so the outgoingAPIMessageReceived echo of this send
+		// is recognised even if posting to GHL takes a while.
+		this.trackOutboundMessage(sendResponse.idMessage, locationId);
 
-		await this.postOutboundMessageToGhl(locationId, ghlContact.id, ghlMessageContent, ghlAttachments);
+		let ghlContact: GhlContact | null;
+		let ghlMessageId: string | undefined;
+		try {
+			ghlContact = await this.getGhlContact(locationId, cleanPhone);
+			if (!ghlContact) {
+				// Release the reservation: the outgoingAPIMessageReceived notification of this send
+				// resolves the contact on its own and can still get the message into GHL.
+				this.forgetOutboundMessage(sendResponse.idMessage);
+				this.gaLogger.warn(`Could not find/create GHL contact for phone ${cleanPhone}`);
+				return {
+					success: true,
+					messageId: sendResponse.idMessage,
+					warning: `${actionType} sent but contact not found in GHL`,
+				};
+			}
+			ghlMessageId = await this.postOutboundMessageToGhl(locationId, ghlContact.id, ghlMessageContent, ghlAttachments);
+		} catch (error) {
+			this.forgetOutboundMessage(sendResponse.idMessage);
+			throw error;
+		}
+		this.trackOutboundMessage(sendResponse.idMessage, locationId, ghlMessageId, "delivered");
 
 		this.gaLogger.info(`Outbound ${actionType} posted to GHL conversation`, {
 			contactId: ghlContact.id,
