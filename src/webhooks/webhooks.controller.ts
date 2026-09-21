@@ -53,6 +53,10 @@ export class WebhooksController {
 		@Headers() headers: Record<string, string>,
 		@Res() res: Response,
 	): Promise<void> {
+		// Header values are left out on purpose: the request carries the workflow token.
+		this.logger.debug(
+			`Workflow action body: ${JSON.stringify(workflowAction)}; header names: ${Object.keys(headers).join(", ")}`,
+		);
 		try {
 			const locationId = headers["locationid"];
 			const contactPhone = headers["contactphone"];

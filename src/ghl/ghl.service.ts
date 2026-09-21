@@ -20,8 +20,6 @@ import {
 	GhlContact,
 	GhlContactUpsertRequest,
 	GhlContactLookup,
-	GhlContactUpsertResponse,
-	GhlDuplicateContactResponse,
 	GhlPlatformMessage,
 	isMessageWebhook,
 	isOutgoingMessageWebhook,
@@ -276,7 +274,12 @@ export class GhlService extends BaseAdapter<
 			const status = error.response?.status;
 			const data = error.response?.data;
 			this.gaLogger.error(`GHL API Error: [${originalRequest?.method?.toUpperCase()} ${originalRequest?.url}] ${status} – ${JSON.stringify(data)}`);
-			throw new HttpException((data as any)?.message || "GHL API request failed", status || HttpStatus.INTERNAL_SERVER_ERROR);
+			// The error body is whatever GHL chose to send, so its message is read only once it has
+			// been shown to be a string.
+			const message = this.isRecord(data) && typeof data.message === "string"
+				? data.message
+				: "GHL API request failed";
+			throw new HttpException(message, status || HttpStatus.INTERNAL_SERVER_ERROR);
 		});
 		return httpClient;
 	}
@@ -302,6 +305,56 @@ export class GhlService extends BaseAdapter<
 		}
 	}
 
+	/** Narrows an unknown payload to something whose fields can be read one by one. */
+	private isRecord(value: unknown): value is Record<string, unknown> {
+		return typeof value === "object" && value !== null && !Array.isArray(value);
+	}
+
+	/**
+	 * Reads a contact out of a GHL response. The wrapped (`{contact: {...}}`) and the bare shape are
+	 * both accepted, and only the fields this integration actually uses are taken over.
+	 *
+	 * A field the payload does not carry is left out here as well: callers tell an absent field
+	 * from an empty one to decide whether a name or a tag may be written, and a field invented with
+	 * an empty value would make them overwrite what a GHL user typed.
+	 */
+	private parseGhlContact(payload: unknown): GhlContact | null {
+		if (!this.isRecord(payload)) {
+			return null;
+		}
+
+		const source = this.isRecord(payload.contact) ? payload.contact : payload;
+		if (typeof source.id !== "string" || source.id.length === 0) {
+			return null;
+		}
+
+		const contact: GhlContact = {id: source.id};
+		if (typeof source.name === "string") contact.name = source.name;
+		if (typeof source.firstName === "string") contact.firstName = source.firstName;
+		if (typeof source.lastName === "string") contact.lastName = source.lastName;
+		if (typeof source.phone === "string") contact.phone = source.phone;
+		if (typeof source.locationId === "string") contact.locationId = source.locationId;
+		if (Array.isArray(source.tags)) {
+			contact.tags = source.tags.filter((tag): tag is string => typeof tag === "string");
+		}
+
+		return contact;
+	}
+
+	/**
+	 * Reads the answer of `POST /contacts/upsert`. `isNew` stays null when the response does not
+	 * say: "the contact was created" and "GHL did not tell us" lead to different decisions about
+	 * overwriting a name, so they must not collapse into one value.
+	 */
+	private parseGhlContactUpsert(payload: unknown): { contact: GhlContact | null; isNew: boolean | null } {
+		const contact = this.parseGhlContact(payload);
+		if (!this.isRecord(payload)) {
+			return {contact, isNew: null};
+		}
+
+		return {contact, isNew: typeof payload.new === "boolean" ? payload.new : null};
+	}
+
 	/**
 	 * Reads a GHL contact by phone number. `/contacts/search/duplicate` resolves the number with
 	 * the same duplicate-detection rules the upsert endpoint applies, so it answers exactly the
@@ -315,42 +368,43 @@ export class GhlService extends BaseAdapter<
 		const formattedPhone = this.formatContactPhone(phone);
 
 		try {
-			const httpClient = await this.getHttpClient(ghlUserId);
-			// 404 and 400 are answers rather than failures, so they must not reach the error
-			// interceptor. Axios encodes the leading "+" as %2B, which is what the API expects.
-			const response = await httpClient.get("/contacts/search/duplicate", {
-				params: {locationId: ghlUserId, number: formattedPhone},
-				validateStatus: status => status === HttpStatus.NOT_FOUND
-					|| status === HttpStatus.BAD_REQUEST
-					|| (status >= 200 && status < 300),
-			});
-
-			if (response.status === HttpStatus.BAD_REQUEST) {
-				// Group chats are stored with the WhatsApp group id in the phone field, which this
-				// endpoint may well refuse. "unknown" keeps the caller from writing blindly.
-				this.gaLogger.warn(`GHL rejected the contact lookup for ${formattedPhone} in Location ${ghlUserId}: ${JSON.stringify(response.data)}`);
-				return {status: "unknown", contact: null};
-			}
-			if (response.status === HttpStatus.NOT_FOUND) {
-				return {status: "missing", contact: null};
-			}
-
-			// The endpoint is documented without a response schema: accept the wrapped
-			// ({contact: {...}}) shape as well as the bare contact.
-			const payload = (response.data || {}) as GhlDuplicateContactResponse;
-			const contact = (payload.contact || payload) as GhlContact | undefined;
-			if (!contact?.id) {
-				// Logged on purpose: an unknown number and an unexpected payload shape look the
-				// same from here, and only the log can tell them apart after a rollout.
-				this.gaLogger.debug(`No GHL contact for phone ${formattedPhone} in Location ${ghlUserId}`, response.data);
-				return {status: "missing", contact: null};
-			}
-
-			return {status: "found", contact};
+			return await this.requestGhlContactByPhone(ghlUserId, formattedPhone);
 		} catch (error) {
 			this.gaLogger.error(`Error looking up GHL contact by phone ${formattedPhone} in Location ${ghlUserId}: ${error.message}`);
 			return {status: "unknown", contact: null};
 		}
+	}
+
+	private async requestGhlContactByPhone(ghlUserId: string, formattedPhone: string): Promise<GhlContactLookup> {
+		const httpClient = await this.getHttpClient(ghlUserId);
+		// 404 and 400 are answers rather than failures, so they must not reach the error
+		// interceptor. Axios encodes the leading "+" as %2B, which is what the API expects.
+		const response = await httpClient.get("/contacts/search/duplicate", {
+			params: {locationId: ghlUserId, number: formattedPhone},
+			validateStatus: status => status === HttpStatus.NOT_FOUND
+				|| status === HttpStatus.BAD_REQUEST
+				|| (status >= 200 && status < 300),
+		});
+
+		if (response.status === HttpStatus.BAD_REQUEST) {
+			// Group chats are stored with the WhatsApp group id in the phone field, which this
+			// endpoint may well refuse. "unknown" keeps the caller from writing blindly.
+			this.gaLogger.warn(`GHL rejected the contact lookup for ${formattedPhone} in Location ${ghlUserId}: ${JSON.stringify(response.data)}`);
+			return {status: "unknown", contact: null};
+		}
+		if (response.status === HttpStatus.NOT_FOUND) {
+			return {status: "missing", contact: null};
+		}
+
+		const contact = this.parseGhlContact(response.data);
+		if (!contact) {
+			// Logged on purpose: an unknown number and an unexpected payload shape look the
+			// same from here, and only the log can tell them apart after a rollout.
+			this.gaLogger.debug(`No GHL contact for phone ${formattedPhone} in Location ${ghlUserId}`, response.data);
+			return {status: "missing", contact: null};
+		}
+
+		return {status: "found", contact};
 	}
 
 	/** Reads a contact by phone. Null means it does not exist or could not be looked up. */
@@ -370,24 +424,25 @@ export class GhlService extends BaseAdapter<
 	 */
 	public async getGhlContactById(ghlUserId: string, contactId: string): Promise<GhlContact | null> {
 		try {
-			const httpClient = await this.getHttpClient(ghlUserId);
-			const response = await httpClient.get(`/contacts/${contactId}`, {
-				validateStatus: status => status === HttpStatus.NOT_FOUND || (status >= 200 && status < 300),
-			});
-
-			if (response.status === HttpStatus.NOT_FOUND) {
-				this.gaLogger.warn(`GHL contact ${contactId} does not exist in Location ${ghlUserId}`);
-				return null;
-			}
-
-			const payload = (response.data || {}) as { contact?: GhlContact };
-			const contact = (payload.contact || payload) as GhlContact | undefined;
-
-			return contact?.id ? contact : null;
+			return await this.requestGhlContactById(ghlUserId, contactId);
 		} catch (error) {
 			this.gaLogger.error(`Error reading GHL contact ${contactId} in Location ${ghlUserId}: ${error.message}`);
 			return null;
 		}
+	}
+
+	private async requestGhlContactById(ghlUserId: string, contactId: string): Promise<GhlContact | null> {
+		const httpClient = await this.getHttpClient(ghlUserId);
+		const response = await httpClient.get(`/contacts/${contactId}`, {
+			validateStatus: status => status === HttpStatus.NOT_FOUND || (status >= 200 && status < 300),
+		});
+
+		if (response.status === HttpStatus.NOT_FOUND) {
+			this.gaLogger.warn(`GHL contact ${contactId} does not exist in Location ${ghlUserId}`);
+			return null;
+		}
+
+		return this.parseGhlContact(response.data);
 	}
 
 	/**
@@ -472,10 +527,18 @@ export class GhlService extends BaseAdapter<
 	): Promise<void> {
 		if (!contact?.id || requiredTags.length === 0) return;
 
-		const tagsMissingFrom = (source: GhlContact) => {
-			const existingTags = new Set((source.tags || []).map(tag => tag.toLowerCase()));
+		// Tags are compared case-insensitively, so they are normalised before they reach a Set or a
+		// lookup: a Set of raw tags would keep "Name" and "name" apart and let the same tag be
+		// written twice.
+		const normalizeTag = (tag: string) => tag.trim().toLowerCase();
+		// Keeps the first spelling of each tag and drops the rest, so the request below cannot ask
+		// GHL to add one tag twice.
+		const wantedTags = [...new Map(requiredTags.map(tag => [normalizeTag(tag), tag])).values()];
 
-			return requiredTags.filter(tag => !existingTags.has(tag.toLowerCase()));
+		const tagsMissingFrom = (source: GhlContact) => {
+			const existingTags = new Set((source.tags || []).map(normalizeTag));
+
+			return wantedTags.filter(tag => !existingTags.has(normalizeTag(tag)));
 		};
 
 		let missingTags = tagsMissingFrom(contact);
@@ -560,23 +623,24 @@ export class GhlService extends BaseAdapter<
 		try {
 			// Upsert rather than a plain create: should a concurrent webhook have created the
 			// contact a moment ago, this updates that one instead of producing a second lead.
-			const {data}: { data: GhlContactUpsertResponse } = await httpClient.post("/contacts/upsert", upsertPayload);
+			const response = await httpClient.post("/contacts/upsert", upsertPayload);
+			const {contact: upsertedContact, isNew} = this.parseGhlContactUpsert(response.data);
 
-			if (!data?.contact?.id) {
-				this.gaLogger.error("Failed to upsert contact or get ID from response. Response data:", data);
+			if (!upsertedContact) {
+				this.gaLogger.error("Failed to upsert contact or get ID from response. Response data:", response.data);
 				throw new Error("Could not get ID from GHL contact upsert response.");
 			}
 
-			let contact = data.contact;
-			if (lookupFailed && data.new) {
+			let contact = upsertedContact;
+			if (lookupFailed && isNew === true) {
 				// The response proves the contact did not exist, so naming it overwrites nothing.
 				contact = await this.nameCreatedGhlContact(httpClient, upsertPayload, newContactName) || contact;
-			} else if (!lookupFailed && data.new === false) {
+			} else if (!lookupFailed && isNew === false) {
 				this.gaLogger.warn(`GHL contact ${contact.id} for ${subject} ${formattedPhone} in Location ${ghlUserId} already existed although the lookup reported it missing, so its name and source were overwritten with "${newContactName}" / "GREEN-API"`);
 			}
 
 			this.gaLogger.log(`Created GHL contact ${contact.id} for ${subject} ${formattedPhone} in Location ${ghlUserId}`);
-			await this.addMissingContactTags(ghlUserId, contact, requiredTags, data.new === true);
+			await this.addMissingContactTags(ghlUserId, contact, requiredTags, isNew === true);
 
 			return contact;
 		} catch (error) {
@@ -596,12 +660,13 @@ export class GhlService extends BaseAdapter<
 		name: string,
 	): Promise<GhlContact | null> {
 		try {
-			const {data}: { data: GhlContactUpsertResponse } = await httpClient.post("/contacts/upsert", {
+			const response = await httpClient.post("/contacts/upsert", {
 				...upsertPayload,
 				name,
 				source: "GREEN-API",
 			});
-			return data?.contact?.id ? data.contact : null;
+
+			return this.parseGhlContact(response.data);
 		} catch (error) {
 			this.gaLogger.warn(`Failed to set the name "${name}" on the freshly created GHL contact in Location ${upsertPayload.locationId}: ${error.message}`);
 			return null;

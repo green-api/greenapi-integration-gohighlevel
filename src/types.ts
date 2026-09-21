@@ -196,60 +196,51 @@ export interface GhlContactUpsertRequest {
 	assignedTo?: string;
 }
 
+/**
+ * A GHL contact as far as this integration is concerned. Only the id is ever guaranteed: the
+ * by-phone duplicate search is documented without a response schema, and even the by-id endpoint
+ * leaves out fields a contact does not have. Telling an absent field from an empty one decides
+ * whether a name or a tag may be written, so nothing here may be promised that was not received.
+ */
 export interface GhlContact {
 	id: string;
-	name: string;
-	locationId: string;
-	firstName: string;
-	lastName: string;
-	email: string;
-	emailLowerCase: string;
-	timezone: string;
-	companyName: string;
-	phone: string;
-	dnd: boolean;
-	dndSettings: GhlDndSettings;
-	type: string;
-	source: string;
-	assignedTo: string;
-	address1: string;
-	city: string;
-	state: string;
-	country: string;
-	postalCode: string;
-	website: string;
-	tags: string[];
-	dateOfBirth: string;
-	dateAdded: string;
-	dateUpdated: string;
-	attachments: string;
-	ssn: string;
-	keyword: string;
-	firstNameLowerCase: string;
-	fullNameLowerCase: string;
-	lastNameLowerCase: string;
-	lastActivity: string;
-	customFields: GhlCustomField[];
-	businessId: string;
-	attributionSource: GhlAttributionSource;
-	lastAttributionSource: GhlAttributionSource;
-	visitorId: string;
+	name?: string;
+	locationId?: string;
+	firstName?: string;
+	lastName?: string;
+	email?: string;
+	emailLowerCase?: string;
+	timezone?: string;
+	companyName?: string;
+	phone?: string;
+	dnd?: boolean;
+	dndSettings?: GhlDndSettings;
+	type?: string;
+	source?: string;
+	assignedTo?: string;
+	address1?: string;
+	city?: string;
+	state?: string;
+	country?: string;
+	postalCode?: string;
+	website?: string;
+	tags?: string[];
+	dateOfBirth?: string;
+	dateAdded?: string;
+	dateUpdated?: string;
+	attachments?: string;
+	ssn?: string;
+	keyword?: string;
+	firstNameLowerCase?: string;
+	fullNameLowerCase?: string;
+	lastNameLowerCase?: string;
+	lastActivity?: string;
+	customFields?: GhlCustomField[];
+	businessId?: string;
+	attributionSource?: GhlAttributionSource;
+	lastAttributionSource?: GhlAttributionSource;
+	visitorId?: string;
 }
-
-export interface GhlContactUpsertResponse {
-	new: boolean;
-	contact: GhlContact;
-	traceId: string;
-}
-
-/**
- * Answer of `GET /contacts/search/duplicate`. The endpoint is documented without a response
- * schema, so the bare contact is accepted alongside the wrapped shape.
- */
-export interface GhlDuplicateContactResponse {
-	contact?: GhlContact | null;
-}
-
 
 /**
  * Outcome of a contact lookup. "unknown" means the question could not be answered - a caller that
