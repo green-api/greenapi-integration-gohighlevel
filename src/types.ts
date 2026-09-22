@@ -1,4 +1,26 @@
 import { User } from ".prisma/client";
+import { GreenApiWebhook, MessageWebhook, WebhookType } from "@green-api/greenapi-integration";
+
+/**
+ * GREEN-API webhook types that carry an actual WhatsApp message.
+ * `outgoingMessageReceived` is emitted for messages sent from the phone itself,
+ * `outgoingAPIMessageReceived` for messages sent through the API (by us or any other integration).
+ */
+export const MESSAGE_WEBHOOK_TYPES = [
+	"incomingMessageReceived",
+	"outgoingMessageReceived",
+	"outgoingAPIMessageReceived",
+] as const satisfies readonly WebhookType[];
+
+export function isMessageWebhook(webhook: GreenApiWebhook): webhook is MessageWebhook {
+	return (MESSAGE_WEBHOOK_TYPES as readonly string[]).includes(webhook.typeWebhook);
+}
+
+/** Plain boolean on purpose: a type predicate here would narrow `webhook` to `never` in else-branches. */
+export function isOutgoingMessageWebhook(webhook: GreenApiWebhook): boolean {
+	return webhook.typeWebhook === "outgoingMessageReceived"
+		|| webhook.typeWebhook === "outgoingAPIMessageReceived";
+}
 
 interface GhlPlatformAttachment {
 	url: string;
@@ -85,10 +107,11 @@ export interface GhlPlatformMessage {
 	contactId: string;
 	locationId: string;
 	message: string;
-	direction: "inbound";
+	direction: "inbound" | "outbound";
 	conversationProviderId?: string;
 	attachments?: GhlPlatformAttachment[];
 	timestamp?: Date;
+	greenApiMessageId?: string;
 }
 
 export type UserCreateData = Omit<User, "createdAt" | "instance"> & { id: string };
@@ -161,6 +184,10 @@ export interface GhlContactUpsertRequest {
 	dnd?: boolean;
 	dndSettings?: GhlDndSettings;
 	inboundDndSettings?: GhlInboundDndSettings;
+	/**
+	 * Replaces the contact's entire tag list, so it is only safe to send while creating a
+	 * contact. Use `POST /contacts/{contactId}/tags` to add tags to an existing one.
+	 */
 	tags?: string[];
 	customFields?: GhlCustomField[];
 	source?: string;
@@ -169,48 +196,57 @@ export interface GhlContactUpsertRequest {
 	assignedTo?: string;
 }
 
+/**
+ * A GHL contact as far as this integration is concerned. Only the id is ever guaranteed: the
+ * by-phone duplicate search is documented without a response schema, and even the by-id endpoint
+ * leaves out fields a contact does not have. Telling an absent field from an empty one decides
+ * whether a name or a tag may be written, so nothing here may be promised that was not received.
+ */
 export interface GhlContact {
 	id: string;
-	name: string;
-	locationId: string;
-	firstName: string;
-	lastName: string;
-	email: string;
-	emailLowerCase: string;
-	timezone: string;
-	companyName: string;
-	phone: string;
-	dnd: boolean;
-	dndSettings: GhlDndSettings;
-	type: string;
-	source: string;
-	assignedTo: string;
-	address1: string;
-	city: string;
-	state: string;
-	country: string;
-	postalCode: string;
-	website: string;
-	tags: string[];
-	dateOfBirth: string;
-	dateAdded: string;
-	dateUpdated: string;
-	attachments: string;
-	ssn: string;
-	keyword: string;
-	firstNameLowerCase: string;
-	fullNameLowerCase: string;
-	lastNameLowerCase: string;
-	lastActivity: string;
-	customFields: GhlCustomField[];
-	businessId: string;
-	attributionSource: GhlAttributionSource;
-	lastAttributionSource: GhlAttributionSource;
-	visitorId: string;
+	name?: string;
+	locationId?: string;
+	firstName?: string;
+	lastName?: string;
+	email?: string;
+	emailLowerCase?: string;
+	timezone?: string;
+	companyName?: string;
+	phone?: string;
+	dnd?: boolean;
+	dndSettings?: GhlDndSettings;
+	type?: string;
+	source?: string;
+	assignedTo?: string;
+	address1?: string;
+	city?: string;
+	state?: string;
+	country?: string;
+	postalCode?: string;
+	website?: string;
+	tags?: string[];
+	dateOfBirth?: string;
+	dateAdded?: string;
+	dateUpdated?: string;
+	attachments?: string;
+	ssn?: string;
+	keyword?: string;
+	firstNameLowerCase?: string;
+	fullNameLowerCase?: string;
+	lastNameLowerCase?: string;
+	lastActivity?: string;
+	customFields?: GhlCustomField[];
+	businessId?: string;
+	attributionSource?: GhlAttributionSource;
+	lastAttributionSource?: GhlAttributionSource;
+	visitorId?: string;
 }
 
-export interface GhlContactUpsertResponse {
-	new: boolean;
-	contact: GhlContact;
-	traceId: string;
+/**
+ * Outcome of a contact lookup. "unknown" means the question could not be answered - a caller that
+ * is about to write must not mistake it for "the contact does not exist".
+ */
+export interface GhlContactLookup {
+	status: "found" | "missing" | "unknown";
+	contact: GhlContact | null;
 }
