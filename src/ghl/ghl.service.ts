@@ -887,6 +887,11 @@ export class GhlService extends BaseAdapter<
 	): Promise<SendResponse> {
 		const locationId = ghlWebhook.locationId;
 		const messageId = ghlWebhook.messageId;
+		// Only messages reach this far - the controller acknowledges everything else - and a message
+		// without an id could neither be marked as delivered nor be tied to its WhatsApp counterpart.
+		if (!messageId) {
+			throw new IntegrationError("GHL message id missing.", "DATA_ERROR");
+		}
 
 		let gaResponse: SendResponse;
 		this.gaLogger.log(`Handling GHL webhook for Green API Instance ID: ${idInstance}`);

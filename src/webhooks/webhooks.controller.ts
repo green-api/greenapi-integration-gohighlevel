@@ -114,6 +114,14 @@ export class WebhooksController {
 		const locationId = ghlWebhook.locationId;
 		const messageId = ghlWebhook.messageId;
 		try {
+			// App lifecycle events (INSTALL, UNINSTALL) land here too, because the marketplace app
+			// has a single webhook address. They are acknowledged rather than rejected: GHL counts
+			// a 4xx as a failed delivery and keeps retrying an event there is nothing to do about.
+			if (ghlWebhook.type !== "SMS") {
+				this.logger.log(`Ignoring GHL webhook type ${ghlWebhook.type}.`);
+				res.status(HttpStatus.OK).send();
+				return;
+			}
 			if (messageId && this.ghlService.wasRecentlyPostedByUs(messageId)) {
 				this.logger.info(`Skipping echo of self-posted message ${messageId} for location ${locationId}`);
 				res.status(HttpStatus.OK).send();
@@ -132,11 +140,6 @@ export class WebhooksController {
 			if (!locationId) {
 				this.logger.error("GHL Location ID is missing", ghlWebhook);
 				throw new BadRequestException("Location ID is missing");
-			}
-			if (ghlWebhook.type !== "SMS") {
-				this.logger.log(`Ignoring GHL webhook type ${ghlWebhook.type}.`);
-				res.status(HttpStatus.OK).send();
-				return;
 			}
 			if (!ghlWebhook.phone) {
 				this.logger.warn(`GHL SMS webhook missing phone, cannot route to WhatsApp`, ghlWebhook);
