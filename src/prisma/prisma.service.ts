@@ -111,6 +111,10 @@ export class PrismaService
 		});
 	}
 
+	async getAllInstances(): Promise<Instance[]> {
+		return this.instance.findMany();
+	}
+
 	async getInstancesByUserId(userId: string): Promise<Instance[]> {
 		return this.instance.findMany({
 			where: {userId},

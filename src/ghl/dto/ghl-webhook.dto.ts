@@ -8,8 +8,14 @@ export class GhlWebhookDto {
 	@IsString()
 	locationId: string;
 
+	/**
+	 * Absent on the app lifecycle events (INSTALL, UNINSTALL) GHL delivers to this same address:
+	 * the marketplace app has only one webhook URL. Requiring it would fail validation before the
+	 * handler can acknowledge them.
+	 */
 	@IsString()
-	messageId: string;
+	@IsOptional()
+	messageId?: string;
 
 	@IsString()
 	@IsNotEmpty()
