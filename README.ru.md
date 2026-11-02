@@ -65,10 +65,11 @@
         - contacts.write
         - conversations.readonly
         - conversations.write
-        - conversations/message.readonly
         - conversations/message.write
-        - locations.readonly
-        - users.readonly
+        - oauth.readonly
+        - oauth.write
+    - `oauth.readonly` и `oauth.write` нужны для установки приложения из аккаунта агентства. Без них установка
+      агентством завершается ошибкой сразу после авторизации
 
 5. **Сгенерируйте учетные данные:**
     - Пролистайте до раздела "Client Keys"

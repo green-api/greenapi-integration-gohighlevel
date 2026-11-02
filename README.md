@@ -65,10 +65,11 @@ Marketplace app:
         - contacts.write
         - conversations.readonly
         - conversations.write
-        - conversations/message.readonly
         - conversations/message.write
-        - locations.readonly
-        - users.readonly
+        - oauth.readonly
+        - oauth.write
+    - `oauth.readonly` and `oauth.write` are required for installs made from an agency account. Without them, agency
+      installs fail right after authorization
 
 5. **Generate credentials:**
     - Go to the "Client Keys" section

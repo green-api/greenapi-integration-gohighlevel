@@ -367,12 +367,33 @@ export class GhlService extends BaseAdapter<
 	private async lookupGhlContactByPhone(ghlUserId: string, phone: string): Promise<GhlContactLookup> {
 		const formattedPhone = this.formatContactPhone(phone);
 
+		if (!await this.canReadGhlContacts(ghlUserId)) {
+			return {status: "unknown", contact: null};
+		}
+
 		try {
 			return await this.requestGhlContactByPhone(ghlUserId, formattedPhone);
 		} catch (error) {
 			this.gaLogger.error(`Error looking up GHL contact by phone ${formattedPhone} in Location ${ghlUserId}: ${error.message}`);
 			return {status: "unknown", contact: null};
 		}
+	}
+
+	private async canReadGhlContacts(ghlUserId: string): Promise<boolean> {
+		let scopes: unknown;
+		try {
+			const user = await this.prisma.getUserWithTokens(ghlUserId);
+			scopes = JSON.parse(Buffer.from(user!.accessToken.split(".")[1], "base64url").toString("utf8")).oauthMeta?.scopes;
+		} catch {
+			scopes = undefined;
+		}
+
+		const canRead = Array.isArray(scopes) && scopes.includes("contacts.readonly");
+		if (!canRead) {
+			this.gaLogger.debug(`Token of Location ${ghlUserId} does not grant contacts.readonly, skipping the contact read`);
+		}
+
+		return canRead;
 	}
 
 	private async requestGhlContactByPhone(ghlUserId: string, formattedPhone: string): Promise<GhlContactLookup> {
@@ -423,6 +444,10 @@ export class GhlService extends BaseAdapter<
 	 * WhatsApp group id, so it is the way in whenever GHL hands us the id.
 	 */
 	public async getGhlContactById(ghlUserId: string, contactId: string): Promise<GhlContact | null> {
+		if (!await this.canReadGhlContacts(ghlUserId)) {
+			return null;
+		}
+
 		try {
 			return await this.requestGhlContactById(ghlUserId, contactId);
 		} catch (error) {
