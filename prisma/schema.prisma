@@ -21,12 +21,23 @@ model User {
   createdAt      DateTime   @default(now())
 }
 
+model Company {
+  id             String    @id
+  accessToken    String    @db.Text
+  refreshToken   String    @db.Text
+  tokenExpiresAt DateTime?
+  createdAt      DateTime  @default(now())
+}
+
 enum InstanceState {
   notAuthorized
   authorized
   yellowCard
   blocked
   starting
+  pendingCode
+  suspended
+  pendingPassword
 }
 
 model Instance {

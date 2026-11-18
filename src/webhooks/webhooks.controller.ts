@@ -18,19 +18,29 @@ import { ConfigService } from "@nestjs/config";
 import { PrismaService } from "../prisma/prisma.service";
 import { WorkflowActionDto } from "../ghl/dto/workflow-action.dto";
 import { WorkflowTokenGuard } from "./guards/workflow-token.guard";
+import { GhlSignatureGuard } from "./guards/ghl-signature.guard";
+import { isTransientError } from "../errors";
+import { GhlAgencyService } from "../ghl/ghl-agency.service";
+import { GREEN_API_WEBHOOK_MAX_ATTEMPTS } from "../constants";
 
 @Controller("webhooks")
 export class WebhooksController {
 	private readonly logger = GreenApiLogger.getInstance(WebhooksController.name);
+	private readonly greenApiWebhookFailures = new Map<string, number>();
 
-	constructor(private readonly ghlService: GhlService, private configService: ConfigService, private prisma: PrismaService) {}
+	constructor(
+		private readonly ghlService: GhlService,
+		private configService: ConfigService,
+		private prisma: PrismaService,
+		private readonly agencyService: GhlAgencyService,
+	) {}
 
 	@Post("green-api")
 	@UseGuards(GreenApiWebhookGuard)
 	@HttpCode(HttpStatus.OK)
 	async handleGreenApiWebhook(@Body() webhook: GreenApiWebhook, @Res() res: Response): Promise<void> {
 		this.logger.debug(`Green API Webhook Body: ${JSON.stringify(webhook)}`);
-		res.status(HttpStatus.OK).send();
+		const key = this.greenApiWebhookKey(webhook);
 		try {
 			await this.ghlService.handleGreenApiWebhook(webhook, [
 				"incomingMessageReceived",
@@ -39,10 +49,33 @@ export class WebhooksController {
 				"outgoingMessageStatus",
 				"stateInstanceChanged",
 				"incomingCall",
+				"outgoingCall",
 			]);
+			this.greenApiWebhookFailures.delete(key);
+			res.status(HttpStatus.OK).send();
 		} catch (error) {
-			this.logger.error(`Error processing Green API webhook`, error);
+			this.logger.error(`Error processing Green API webhook ${key}`, error);
+			if (!isTransientError(error)) {
+				this.greenApiWebhookFailures.delete(key);
+				res.status(HttpStatus.OK).send();
+				return;
+			}
+			const attempts = (this.greenApiWebhookFailures.get(key) ?? 0) + 1;
+			if (attempts >= GREEN_API_WEBHOOK_MAX_ATTEMPTS) {
+				this.greenApiWebhookFailures.delete(key);
+				this.logger.error(`Dropping Green API webhook ${key} after ${attempts} failed attempts`);
+				res.status(HttpStatus.OK).send();
+				return;
+			}
+			this.greenApiWebhookFailures.set(key, attempts);
+			this.logger.warn(`Green API webhook ${key} failed temporarily (attempt ${attempts}), asking GREEN-API to retry`);
+			res.status(HttpStatus.SERVICE_UNAVAILABLE).send();
 		}
+	}
+
+	private greenApiWebhookKey(webhook: GreenApiWebhook): string {
+		const idMessage = "idMessage" in webhook ? webhook.idMessage : "";
+		return `${webhook.instanceData?.idInstance}:${webhook.typeWebhook}:${idMessage}:${webhook.timestamp}`;
 	}
 
 	@Post("workflow-action")
@@ -69,6 +102,12 @@ export class WebhooksController {
 			}
 			if (!workflowAction.data.instanceId) {
 				throw new BadRequestException("Instance ID is required");
+			}
+
+			if (workflowAction.data.audioUrl) {
+				const callResult = await this.ghlService.startWorkflowCall(locationId, contactPhone, workflowAction.data);
+				res.status(HttpStatus.OK).json(callResult);
+				return;
 			}
 
 			let actionType: "message" | "file" | "interactive-buttons" | "reply-buttons";
@@ -107,6 +146,7 @@ export class WebhooksController {
 	}
 
 	@Post("ghl")
+	@UseGuards(GhlSignatureGuard)
 	@HttpCode(HttpStatus.OK)
 	async handleGhlWebhook(@Body() ghlWebhook: GhlWebhookDto, @Res() res: Response): Promise<void> {
 		this.logger.debug(`GHL Webhook Body: ${JSON.stringify(ghlWebhook)}`);
@@ -117,6 +157,11 @@ export class WebhooksController {
 			// App lifecycle events (INSTALL, UNINSTALL) land here too, because the marketplace app
 			// has a single webhook address. They are acknowledged rather than rejected: GHL counts
 			// a 4xx as a failed delivery and keeps retrying an event there is nothing to do about.
+			if (ghlWebhook.type === "INSTALL" || ghlWebhook.type === "UNINSTALL") {
+				await this.handleAppLifecycleEvent(ghlWebhook);
+				res.status(HttpStatus.OK).send();
+				return;
+			}
 			if (ghlWebhook.type !== "SMS") {
 				this.logger.log(`Ignoring GHL webhook type ${ghlWebhook.type}.`);
 				res.status(HttpStatus.OK).send();
@@ -211,6 +256,30 @@ export class WebhooksController {
 	 * conversations too, whose "phone" holds a WhatsApp group id rather than a number and which a
 	 * lookup by phone cannot resolve.
 	 */
+	private async handleAppLifecycleEvent(event: GhlWebhookDto): Promise<void> {
+		const {type, installType, locationId, companyId} = event;
+		this.logger.info(`GHL app ${type} event`, {installType, locationId, companyId});
+
+		if (type === "INSTALL") {
+			if (installType !== "Location" || !locationId || !companyId) return;
+			const user = await this.prisma.findUser(locationId);
+			if (user?.accessToken) return;
+			if (!await this.agencyService.hasCompany(companyId)) {
+				this.logger.warn(`No agency tokens for company ${companyId}, location ${locationId} gets its tokens through the OAuth callback`);
+				return;
+			}
+			await this.agencyService.installLocation(companyId, locationId);
+			this.logger.log(`Location ${locationId} installed with the agency token of company ${companyId}`);
+			return;
+		}
+
+		if (locationId) {
+			await this.ghlService.uninstallLocation(locationId);
+		} else if (companyId) {
+			await this.agencyService.removeCompany(companyId);
+		}
+	}
+
 	private async resolveRoutingContact(locationId: string, ghlWebhook: GhlWebhookDto): Promise<GhlContact | null> {
 		if (ghlWebhook.contactId) {
 			const contact = await this.ghlService.getGhlContactById(locationId, ghlWebhook.contactId);

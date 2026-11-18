@@ -99,8 +99,30 @@ export interface WorkflowActionData {
 	button3Type?: string;
 	button3Text?: string;
 	button3Value?: string;
+	audioUrl?: string;
 
 	[key: string]: any;
+}
+
+export interface WorkflowCallResult {
+	success: boolean;
+	callId: string;
+}
+
+export type GhlCallStatus = "pending" | "completed" | "answered" | "busy" | "no-answer" | "failed" | "canceled" | "voicemail";
+
+export interface GhlCallLogRequest {
+	type: "Call";
+	conversationProviderId: string;
+	conversationId: string;
+	altId: string;
+	date: string;
+	direction?: "inbound";
+	call: {
+		from: string;
+		to: string;
+		status: GhlCallStatus;
+	};
 }
 
 export interface GhlPlatformMessage {

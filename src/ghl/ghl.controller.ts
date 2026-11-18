@@ -57,7 +57,6 @@ export class GhlController {
 				name: instance.name || `Instance ${instance.idInstance}`,
 				state: instance.stateInstance,
 				createdAt: instance.createdAt,
-				settings: instance.settings,
 			})),
 		};
 	}
@@ -127,6 +126,7 @@ export class GhlController {
 				throw new HttpException("Instance not found", HttpStatus.NOT_FOUND);
 			}
 
+			await this.ghlService.detachInstance(instance);
 			await this.prisma.removeInstance(BigInt(instanceId));
 
 			return {
@@ -150,12 +150,13 @@ export class GhlController {
 	async updateInstance(
 		@Param("instanceId") instanceId: string,
 		@Body() dto: UpdateInstanceDto,
+		@Req() req: AuthReq,
 	) {
 		this.logger.log(`Updating instance: ${instanceId}`);
 		try {
 			let instance = await this.prisma.getInstance(BigInt(instanceId));
-			if (!instance) {
-				throw new HttpException("Instance not found", HttpStatus.NOT_FOUND);
+			if (!instance || instance.userId !== req.locationId) {
+				throw new HttpException("Unauthorized", HttpStatus.FORBIDDEN);
 			}
 			if (dto.name) {
 				instance = await this.prisma.updateInstanceName(BigInt(instanceId), dto.name);

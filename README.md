@@ -130,6 +130,9 @@ Marketplace app:
     - `OUTGOING_API_ECHO_DELAY_MS` (default `3000`): how long the adapter waits before handling an
       `outgoingAPIMessageReceived` notification. The delay gives the adapter's own sends time to be
       registered, so they are not posted to GHL twice.
+    - `GHL_CALL_PROVIDER_ID`: the ID of the app's Call conversation provider. Turns on call logs, see
+      [Calls](#calls).
+    - `FFMPEG_PATH` (default `ffmpeg`): path to ffmpeg, used by the call workflow action, see [Calls](#calls).
 
 4. **Apply database migrations:**
 
@@ -302,8 +305,6 @@ Once installed, the integration works automatically:
 5. This requires the `outgoingMessageWebhook`, `outgoingAPIMessageWebhook` and `outgoingWebhook`
    notifications to be enabled on the instance. New instances get them right away, and existing
    instances are brought up to date automatically when the adapter starts.
-   **Note:** enabling notifications reboots the GREEN-API instance, and the new settings are applied
-   within a few minutes.
 
 ### Important Note
 
@@ -316,6 +317,51 @@ instance they contact, will appear in a **single conversation thread**.
 - Contact name starting with `[Group]`
 - Phone field containing a long numeric ID instead of a traditional phone number
 - `whatsapp-group` tag automatically applied to group contacts
+
+## Calls
+
+The integration supports WhatsApp calls through the GREEN-API Calling API. Calls work only on instances whose
+GREEN-API plan includes calls. The adapter checks this for each instance and leaves call features out where calls
+are not available.
+
+### Call Logs in Conversations
+
+1. In the GHL Developer Portal, add a conversation provider of type **Call** to the app.
+2. Set `GHL_CALL_PROVIDER_ID` to its ID and restart the adapter.
+
+With the variable set, every finished WhatsApp call is logged in the contact's conversation with its result:
+completed, no answer, busy or failed. For answered calls on instances with calls, the recording is posted to the
+conversation as soon as GREEN-API has it ready.
+
+The recording in GHL points to the adapter (`YOUR_APP_URL/call-recordings/...`), not to GREEN-API directly, because
+GREEN-API's download links expire after 1 hour. When someone plays it, the adapter asks GREEN-API for a fresh download
+link and redirects there, so the recording keeps working as long as GREEN-API stores it. The link is signed with a key
+derived from `GHL_CLIENT_SECRET`: changing the client secret makes older recording links stop working.
+
+When the variable is set, the adapter also enables outgoing call notifications (`outgoingCallWebhook`) on every
+instance when it starts.
+
+Without the variable, incoming calls are posted to the conversation as text messages and outgoing calls are ignored.
+
+### Phone on the App Page
+
+The app page (custom page) has a **Phone** card for making and answering WhatsApp calls in the browser. The card is
+shown when:
+
+- the custom page has the **Allow microphone** permission in the GHL Developer Portal
+- at least one instance of the account has calls in its plan (only those instances are listed)
+
+The reverse proxy in front of the adapter must pass WebSocket connections on `/calls-phone`.
+
+### Workflow Action: Call and Play Audio
+
+A workflow action whose data contains `instanceId` and `audioUrl` calls the contact from that instance, plays the
+audio file when the call is answered and then hangs up. The action responds with the call ID right after dialing.
+
+- The action is sent to `YOUR_APP_URL/webhooks/workflow-action`, like the other workflow actions.
+- The adapter converts the audio with ffmpeg. The Docker image installs it; outside Docker, install ffmpeg or set
+  `FFMPEG_PATH`.
+- GHL has to approve a new workflow action before accounts can use it.
 
 ## Troubleshooting
 

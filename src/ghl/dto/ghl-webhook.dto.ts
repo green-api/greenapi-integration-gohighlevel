@@ -6,7 +6,16 @@ export class GhlWebhookDto {
 	contactId?: string;
 
 	@IsString()
+	@IsOptional()
 	locationId: string;
+
+	@IsString()
+	@IsOptional()
+	installType?: string;
+
+	@IsString()
+	@IsOptional()
+	companyId?: string;
 
 	/**
 	 * Absent on the app lifecycle events (INSTALL, UNINSTALL) GHL delivers to this same address:

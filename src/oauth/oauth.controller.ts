@@ -7,7 +7,7 @@ import axios from "axios";
 import { PrismaService } from "../prisma/prisma.service";
 import { GhlOAuthCallbackDto } from "./dto/ghl-oauth-callback.dto";
 import { GreenApiLogger } from "@green-api/greenapi-integration";
-import { InstalledLocation, InstalledLocationsResponse, LocationTokenResponse } from "../types";
+import { GhlAgencyService } from "../ghl/ghl-agency.service";
 
 @Controller("oauth")
 export class GhlOauthController {
@@ -17,6 +17,7 @@ export class GhlOauthController {
 	constructor(
 		private readonly configService: ConfigService,
 		private readonly prisma: PrismaService,
+		private readonly agencyService: GhlAgencyService,
 	) {}
 
 	@Get("callback")
@@ -50,7 +51,7 @@ export class GhlOauthController {
 			);
 
 			const tokenData = tokenResponse.data;
-			this.logger.log("GHL Token response received", tokenData);
+			this.logger.info("GHL Token response received", this.describeTokenResponse(tokenData));
 
 			if (tokenData.isBulkInstallation || tokenData.userType === "Company") {
 				this.logger.log("Bulk installation detected");
@@ -62,7 +63,7 @@ export class GhlOauthController {
 			} = tokenData;
 
 			if (!respLocationId) {
-				this.logger.error("GHL Token response did not include locationId!", tokenData);
+				this.logger.error("GHL Token response did not include locationId!", this.describeTokenResponse(tokenData));
 				throw new HttpException("Failed to get Location ID from GHL token response.", HttpStatus.INTERNAL_SERVER_ERROR);
 			}
 
@@ -236,54 +237,25 @@ export class GhlOauthController {
 			`);
 		} catch (error) {
 			this.logger.error("Error exchanging GHL OAuth code for tokens:", error);
-			const errorDesc = (error.response?.data as any)?.error_description || (error.response?.data as any)?.error || "Unknown GHL OAuth error";
+			const errorDesc = (error.response?.data as any)?.error_description || (error.response?.data as any)?.error || "Unknown error";
 			throw new HttpException(
-				`Failed to obtain GHL tokens: ${errorDesc}`,
+				`Could not finish the installation: ${errorDesc}`,
 				error.response?.status || HttpStatus.INTERNAL_SERVER_ERROR,
 			);
 		}
 	}
 
+	private describeTokenResponse(tokenData: any) {
+		const {userType, isBulkInstallation, locationId, companyId, scope} = tokenData ?? {};
+		return {userType, isBulkInstallation, locationId, companyId, scope};
+	}
+
 	private async handleBulkInstallation(tokenData: any, res: Response) {
-		const {access_token, companyId} = tokenData;
+		const {companyId} = tokenData;
 
 		try {
-			const installedLocations = await this.getInstalledLocations(access_token, companyId);
-			this.logger.log(`Found ${installedLocations.locations.length} installed locations for company ${companyId}`);
-
-			const successful: InstalledLocation[] = [];
-			const failed: Array<{ location: InstalledLocation; error: string }> = [];
-
-			for (const location of installedLocations.locations) {
-				if (!location.isInstalled) continue;
-
-				try {
-					const locationToken = await this.getLocationToken(access_token, companyId, location._id);
-
-					await this.prisma.user.upsert({
-						where: {id: location._id},
-						update: {
-							accessToken: locationToken.access_token,
-							refreshToken: locationToken.refresh_token,
-							tokenExpiresAt: new Date(Date.now() + locationToken.expires_in * 1000),
-							companyId,
-						},
-						create: {
-							id: location._id,
-							accessToken: locationToken.access_token,
-							refreshToken: locationToken.refresh_token,
-							tokenExpiresAt: new Date(Date.now() + locationToken.expires_in * 1000),
-							companyId,
-						},
-					});
-
-					successful.push(location);
-					this.logger.log(`Created user for location ${location._id} (${location.name})`);
-				} catch (error) {
-					failed.push({location, error: error.message});
-					this.logger.error(`Failed for location ${location._id}: ${error.message}`);
-				}
-			}
+			await this.agencyService.saveCompanyTokens(companyId, tokenData);
+			const {successful, failed} = await this.agencyService.installAllLocations(companyId);
 
 			return res.status(200).send(`
 				<!DOCTYPE html>
@@ -593,7 +565,7 @@ export class GhlOauthController {
 								</svg>
 							</div>
 							<h1>Bulk Installation Complete!</h1>
-							<p>GREEN-API WhatsApp integration has been successfully installed across multiple locations</p>
+							<p>GREEN-API WhatsApp integration has been successfully installed in several accounts</p>
 						</div>
 
 						<div class="content">
@@ -614,7 +586,7 @@ export class GhlOauthController {
 
 							${successful.length > 0 ? `
 							<div class="locations-section">
-								<h3 class="section-title">✅ Successfully Installed Locations</h3>
+								<h3 class="section-title">✅ Installed accounts</h3>
 								<div class="locations-grid">
 									${successful.map(loc => `
 										<div class="location-card">
@@ -644,7 +616,7 @@ export class GhlOauthController {
 							` : ""}
 
 							<div class="highlight">
-								🎉 Each location can now manage WhatsApp instances independently through their GREEN-API WhatsApp app in the navigation panel.
+								🎉 Each account can now connect its WhatsApp numbers on the GREEN-API WhatsApp page in its menu.
 							</div>
 
 							<div class="close-note">
@@ -659,43 +631,5 @@ export class GhlOauthController {
 			this.logger.error("Error processing bulk installation:", error);
 			throw new HttpException(`Failed to process bulk installation: ${error.message}`, HttpStatus.INTERNAL_SERVER_ERROR);
 		}
-	}
-
-	private async getInstalledLocations(companyToken: string, companyId: string): Promise<InstalledLocationsResponse> {
-		const appId = this.configService.get<string>("GHL_APP_ID");
-		if (!appId) {
-			throw new Error("GHL_APP_ID not configured");
-		}
-
-		const response = await axios.get(`${this.ghlServicesUrl}/oauth/installedLocations`, {
-			headers: {
-				Authorization: `Bearer ${companyToken}`,
-				Version: "2021-07-28",
-			},
-			params: {
-				appId,
-				companyId,
-				isInstalled: true,
-				limit: 100,
-			},
-		});
-
-		return response.data;
-	}
-
-	private async getLocationToken(companyToken: string, companyId: string, locationId: string): Promise<LocationTokenResponse> {
-		const formData = new URLSearchParams();
-		formData.append("companyId", companyId);
-		formData.append("locationId", locationId);
-
-		const response = await axios.post(`${this.ghlServicesUrl}/oauth/locationToken`, formData.toString(), {
-			headers: {
-				Authorization: `Bearer ${companyToken}`,
-				Version: "2021-07-28",
-				"Content-Type": "application/x-www-form-urlencoded",
-			},
-		});
-
-		return response.data;
 	}
 }

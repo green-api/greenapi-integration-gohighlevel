@@ -56,6 +56,7 @@ export class GhlTransformer
 					messageText = `📞 Call answered from ${callerPhone}`;
 					break;
 				case "hangUp":
+				case "hungUp":
 					messageText = `📞 Call ended by recipient - ${callerPhone} (hung up or do not disturb)`;
 					break;
 				case "missed":
@@ -273,6 +274,10 @@ export class GhlTransformer
 				messageText = `✅ Button clicked:\n\n${templateButtonReply.selectedDisplayText}`;
 				break;
 
+			case "interactiveButtonsResponse":
+				messageText = `✅ Button clicked:\n\n${msgData.interactiveButtonsResponse.selectedDisplayText}`;
+				break;
+
 			default:
 				this.logger.warn(`Unsupported GREEN-API message type`, msgData);
 				messageText = isOutgoing
@@ -284,6 +289,10 @@ export class GhlTransformer
 	}
 
 	toGreenApiMessage(ghlWebhook: GhlWebhookDto): Message {
+		return this.toGreenApiMessages(ghlWebhook)[0];
+	}
+
+	toGreenApiMessages(ghlWebhook: GhlWebhookDto): Message[] {
 		this.logger.debug(`Transforming GHL Webhook to Green API Message: ${JSON.stringify(ghlWebhook)}`);
 
 		if (ghlWebhook.type === "SMS" && ghlWebhook.phone) {
@@ -291,24 +300,23 @@ export class GhlTransformer
 			const chatId = formatPhoneNumber(ghlWebhook.phone, isGroupChatId ? "group" : "private");
 
 			if (ghlWebhook.attachments && ghlWebhook.attachments.length > 0) {
-				const attachmentUrl = ghlWebhook.attachments[0];
-				this.logger.debug(`GHL webhook has attachments. Processing as url-file. Attachment URL: ${attachmentUrl}`);
-				return {
+				this.logger.debug(`GHL webhook has ${ghlWebhook.attachments.length} attachment(s). Processing as url-file.`);
+				return ghlWebhook.attachments.map((attachmentUrl, index): Message => ({
 					type: "url-file",
 					chatId: chatId,
 					file: {
 						url: attachmentUrl,
-						fileName: `${Date.now()}_${ghlWebhook.messageId || "unknown"}`.replace(/[^a-zA-Z0-9_.-]/g, "_"),
+						fileName: this.attachmentFileName(attachmentUrl, `${Date.now()}_${ghlWebhook.messageId || "unknown"}_${index + 1}`),
 					},
-					caption: ghlWebhook.message || "",
-				};
+					caption: index === 0 ? ghlWebhook.message || "" : "",
+				}));
 			} else if (ghlWebhook.message) {
 				this.logger.debug(`GHL webhook has a text message. Processing as text. Message: "${ghlWebhook.message}"`);
-				return {
+				return [{
 					type: "text",
 					chatId: chatId,
 					message: ghlWebhook.message,
-				};
+				}];
 			} else {
 				this.logger.warn(`GHL SMS webhook for ${ghlWebhook.phone} has no text content and no attachments. Ignoring.`);
 				throw new Error(`GHL SMS webhook has no message content or attachments for ${ghlWebhook.phone}`);
@@ -317,5 +325,16 @@ export class GhlTransformer
 
 		this.logger.error(`Cannot transform GHL webhook. Type: ${ghlWebhook.type}, Phone: ${ghlWebhook.phone}, Msg: ${ghlWebhook.message}`);
 		throw new Error(`Unsupported GHL webhook for Green API. Type: ${ghlWebhook.type}, Phone: ${ghlWebhook.phone}`);
+	}
+
+	private attachmentFileName(url: string, fallback: string): string {
+		let name = "";
+		try {
+			name = decodeURIComponent(new URL(url).pathname.split("/").pop() || "");
+		} catch {
+			name = "";
+		}
+		name = name.replace(/[^\p{L}\p{N}_.() -]/gu, "_").trim();
+		return name.includes(".") ? name : fallback;
 	}
 }

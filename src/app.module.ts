@@ -6,6 +6,7 @@ import { OauthModule } from './oauth/oauth.module';
 import { WebhooksModule } from './webhooks/webhooks.module';
 import { ThrottlerModule } from '@nestjs/throttler';
 import { CustomPageModule } from './custom-page/custom-page.module';
+import { CallsModule } from './calls/calls.module';
 
 @Module({
     imports: [
@@ -18,6 +19,7 @@ import { CustomPageModule } from './custom-page/custom-page.module';
         WebhooksModule,
         ThrottlerModule.forRoot([{ ttl: 60000, limit: 100 }]),
         CustomPageModule,
+        CallsModule,
     ],
 })
 export class AppModule {}

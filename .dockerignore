@@ -6,3 +6,4 @@ node_modules
 .env.example
 README.md
 README.ru.md
+.env

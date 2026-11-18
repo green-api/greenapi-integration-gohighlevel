@@ -10,22 +10,35 @@ import {
 	Settings, StateInstanceWebhook,
 	WaSettings, SendResponse, SendInteractiveButtonsReply, formatPhoneNumber,
 	MessageWebhook, MessageType, OutgoingMessageStatus, OutgoingMessageStatusWebhook,
+	CallWebhook, IncomingCallWebhook, CallVoice,
 } from "@green-api/greenapi-integration";
 import { GhlTransformer } from "./ghl.transformer";
 import { PrismaService } from "../prisma/prisma.service";
+import { CallsAvailabilityService } from "../calls/calls-availability.service";
+import { CallRecordingLinksService } from "../calls/call-recording-links.service";
 import { GhlWebhookDto } from "./dto/ghl-webhook.dto";
 import type { Instance, User } from "@prisma/client";
 import { randomBytes } from "crypto";
 import {
+	GhlCallLogRequest,
+	GhlCallStatus,
 	GhlContact,
 	GhlContactUpsertRequest,
 	GhlContactLookup,
 	GhlPlatformMessage,
 	isMessageWebhook,
 	isOutgoingMessageWebhook,
-	MessageStatusPayload, WorkflowActionData, WorkflowActionResult,
+	MessageStatusPayload, WorkflowActionData, WorkflowActionResult, WorkflowCallResult,
 } from "../types";
 import { SendInteractiveButtons } from "@green-api/greenapi-integration/dist/types/types";
+import {
+	CALL_END_STATUSES,
+	CALL_RECORDING_MESSAGE,
+	CALL_RECORDING_POLL_ATTEMPTS,
+	CALL_RECORDING_POLL_INTERVAL_MS,
+	GHL_TOKEN_REFRESH_MARGIN_MS,
+	MAX_PHONE_DIGITS,
+} from "../constants";
 
 /**
  * Webhook notification types the integration relies on. Every GREEN-API instance managed by the
@@ -43,6 +56,10 @@ export const REQUIRED_WEBHOOK_SETTINGS = {
 	outgoingWebhook: "yes",
 	outgoingMessageWebhook: "yes",
 	outgoingAPIMessageWebhook: "yes",
+} as const satisfies Settings;
+
+export const CALL_LOG_WEBHOOK_SETTINGS = {
+	outgoingCallWebhook: "yes",
 } as const satisfies Settings;
 
 /** Ties a GHL contact to the GREEN-API instance whose chat it belongs to. */
@@ -90,6 +107,8 @@ export class GhlService extends BaseAdapter<
 	private readonly selfPostedMessageIds = new Map<string, number>();
 	private readonly outboundMessageTtlMs = 24 * 60 * 60 * 1000;
 	private readonly outboundMessages = new Map<string, TrackedOutboundMessage>();
+	private readonly tokenRefreshes = new Map<string, Promise<string>>();
+	private readonly conversationLocks = new Map<string, Promise<unknown>>();
 	/**
 	 * Messages the integration sends itself come back as `outgoingAPIMessageReceived`. They are
 	 * registered as soon as GREEN-API answers the send request, but the notification can overtake
@@ -126,10 +145,10 @@ export class GhlService extends BaseAdapter<
 
 	/**
 	 * Makes sure every stored instance has all notification types the integration needs enabled.
-	 * `setSettings` reboots the instance, so it is only called when something actually differs.
 	 */
 	public async syncInstancesWebhookSettings(): Promise<void> {
 		const instances = await this.prisma.getAllInstances();
+		const required = this.requiredWebhookSettings();
 		this.gaLogger.info(`Checking webhook settings of ${instances.length} instance(s)`);
 
 		let updated = 0;
@@ -137,7 +156,7 @@ export class GhlService extends BaseAdapter<
 			try {
 				const client = this.createGreenApiClient(instance);
 				const remoteSettings = await client.getSettings();
-				const missing = Object.entries(REQUIRED_WEBHOOK_SETTINGS)
+				const missing = Object.entries(required)
 					.filter(([key, value]) => remoteSettings[key as keyof Settings] !== value);
 
 				if (missing.length === 0) continue;
@@ -145,10 +164,10 @@ export class GhlService extends BaseAdapter<
 				this.gaLogger.info(`Enabling missing notifications on instance ${instance.idInstance}`, {
 					missing: missing.map(([key]) => key),
 				});
-				await client.setSettings({...REQUIRED_WEBHOOK_SETTINGS});
+				await client.setSettings({...required});
 				await this.prisma.updateInstanceSettings(instance.idInstance, {
 					...(instance.settings || {}),
-					...REQUIRED_WEBHOOK_SETTINGS,
+					...required,
 				});
 				updated++;
 			} catch (error) {
@@ -206,6 +225,8 @@ export class GhlService extends BaseAdapter<
 		protected readonly ghlTransformer: GhlTransformer,
 		protected readonly prisma: PrismaService,
 		private readonly configService: ConfigService,
+		private readonly callsAvailability: CallsAvailabilityService,
+		private readonly recordingLinks: CallRecordingLinksService,
 	) {
 		super(ghlTransformer, prisma);
 		const configuredDelay = Number(this.configService.get<string>("OUTGOING_API_ECHO_DELAY_MS"));
@@ -221,16 +242,10 @@ export class GhlService extends BaseAdapter<
 
 		let currentAccessToken = userWithTokens.accessToken;
 
-		if (userWithTokens.tokenExpiresAt && new Date(userWithTokens.tokenExpiresAt).getTime() < Date.now() + 5 * 60 * 1000) {
+		if (this.isTokenExpiring(userWithTokens)) {
 			this.gaLogger.log(`GHL Access token for User ${ghlUserId} expiring. Refreshing...`);
 			try {
-				const newTokens = await this.refreshGhlAccessToken(userWithTokens.refreshToken);
-				await this.prisma.updateUserTokens(
-					ghlUserId, newTokens.access_token, newTokens.refresh_token,
-					new Date(Date.now() + newTokens.expires_in * 1000),
-				);
-				currentAccessToken = newTokens.access_token;
-				this.gaLogger.log(`GHL Access token refreshed for User ${ghlUserId}`);
+				currentAccessToken = await this.refreshAccessToken(ghlUserId);
 			} catch (error) {
 				this.gaLogger.error(`Failed to refresh GHL access token for User ${ghlUserId}: ${error.message}`);
 				throw new HttpException(`Failed to refresh GHL token for User ${ghlUserId}. Re-authorize.`, HttpStatus.UNAUTHORIZED);
@@ -248,23 +263,15 @@ export class GhlService extends BaseAdapter<
 
 		httpClient.interceptors.response.use((response) => response, async (error: AxiosError) => {
 			const originalRequest = error.config;
-			const userForRetry = await this.prisma.getUserWithTokens(ghlUserId);
-			if (!userForRetry?.refreshToken) {
-				this.gaLogger.error(`User ${ghlUserId} or refresh token disappeared during retry logic.`);
-				throw error;
-			}
 
 			if (error.response?.status === 401 && originalRequest && !originalRequest.headers["_retry"]) {
 				originalRequest.headers["_retry"] = true;
 				this.gaLogger.warn(`GHL API request 401 for User ${ghlUserId}. Retrying with token refresh.`);
 				try {
-					const newTokens = await this.refreshGhlAccessToken(userForRetry.refreshToken);
-					await this.prisma.updateUserTokens(
-						ghlUserId, newTokens.access_token, newTokens.refresh_token,
-						new Date(Date.now() + newTokens.expires_in * 1000),
-					);
+					const rejectedToken = String(originalRequest.headers["Authorization"] ?? "").replace(/^Bearer /, "");
+					const accessToken = await this.refreshAccessToken(ghlUserId, rejectedToken);
 					this.gaLogger.log(`GHL Token refreshed after 401 for User ${ghlUserId}`);
-					originalRequest.headers["Authorization"] = `Bearer ${newTokens.access_token}`;
+					originalRequest.headers["Authorization"] = `Bearer ${accessToken}`;
 					return httpClient(originalRequest);
 				} catch (refreshError) {
 					this.gaLogger.error(`Failed to refresh GHL token after 401 for User ${ghlUserId}: ${refreshError.message}`);
@@ -282,6 +289,38 @@ export class GhlService extends BaseAdapter<
 			throw new HttpException(message, status || HttpStatus.INTERNAL_SERVER_ERROR);
 		});
 		return httpClient;
+	}
+
+	private isTokenExpiring(user: User): boolean {
+		return !!user.tokenExpiresAt && new Date(user.tokenExpiresAt).getTime() < Date.now() + GHL_TOKEN_REFRESH_MARGIN_MS;
+	}
+
+	private refreshAccessToken(ghlUserId: string, rejectedToken?: string): Promise<string> {
+		const running = this.tokenRefreshes.get(ghlUserId);
+		if (running) return running;
+
+		const refresh = this.runTokenRefresh(ghlUserId, rejectedToken).finally(() => this.tokenRefreshes.delete(ghlUserId));
+		this.tokenRefreshes.set(ghlUserId, refresh);
+		return refresh;
+	}
+
+	private async runTokenRefresh(ghlUserId: string, rejectedToken?: string): Promise<string> {
+		const user = await this.prisma.getUserWithTokens(ghlUserId);
+		if (!user?.accessToken || !user.refreshToken) {
+			throw new HttpException(`GHL auth tokens not found for User ${ghlUserId}. Re-authorize.`, HttpStatus.UNAUTHORIZED);
+		}
+		const alreadyRefreshed = rejectedToken !== undefined
+			? user.accessToken !== rejectedToken
+			: !this.isTokenExpiring(user);
+		if (alreadyRefreshed) return user.accessToken;
+
+		const newTokens = await this.refreshGhlAccessToken(user.refreshToken);
+		await this.prisma.updateUserTokens(
+			ghlUserId, newTokens.access_token, newTokens.refresh_token,
+			new Date(Date.now() + newTokens.expires_in * 1000),
+		);
+		this.gaLogger.log(`GHL Access token refreshed for User ${ghlUserId}`);
+		return newTokens.access_token;
 	}
 
 	private async refreshGhlAccessToken(refreshToken: string): Promise<{
@@ -785,7 +824,27 @@ export class GhlService extends BaseAdapter<
 		}
 	}
 
-	private async getOrCreateGhlConversation(
+	private async withConversationLock<T>(key: string, task: () => Promise<T>): Promise<T> {
+		const previous = this.conversationLocks.get(key) ?? Promise.resolve();
+		const current = previous.then(task, task);
+		const tail = current.catch(() => undefined);
+		this.conversationLocks.set(key, tail);
+		try {
+			return await current;
+		} finally {
+			if (this.conversationLocks.get(key) === tail) this.conversationLocks.delete(key);
+		}
+	}
+
+	private getOrCreateGhlConversation(
+		httpClient: AxiosInstance,
+		ghlUserId: string,
+		contactId: string,
+	): Promise<string> {
+		return this.withConversationLock(`${ghlUserId}:${contactId}`, () => this.findOrCreateGhlConversation(httpClient, ghlUserId, contactId));
+	}
+
+	private async findOrCreateGhlConversation(
 		httpClient: AxiosInstance,
 		ghlUserId: string,
 		contactId: string,
@@ -925,31 +984,30 @@ export class GhlService extends BaseAdapter<
 		const instance = await this.prisma.getInstance(BigInt(idInstance));
 		if (!instance) throw new NotFoundError(`Instance ${idInstance} not found.`);
 		if (!instance.user) throw new IntegrationError("Instance not linked to User.", "DATA_ERROR");
-		if (instance.stateInstance !== "authorized") throw new IntegrationError("Instance is not authorized", "INSTANCE_NOT_AUTHORIZED");
+		if (!await this.isInstanceAuthorized(instance)) throw new IntegrationError("Instance is not authorized", "INSTANCE_NOT_AUTHORIZED", 400);
 
 		const greenApiClient = this.createGreenApiClient(instance);
-		const transformedMessage = this.ghlTransformer.toGreenApiMessage(ghlWebhook);
+		const transformedMessages = this.ghlTransformer.toGreenApiMessages(ghlWebhook);
 
-		this.gaLogger.log(`Transformed GHL message to Green API format for instance ${idInstance}`);
-		this.gaLogger.debug(`Green API Message: ${JSON.stringify(transformedMessage)}`);
+		this.gaLogger.log(`Transformed GHL message to ${transformedMessages.length} Green API message(s) for instance ${idInstance}`);
 
-		switch (transformedMessage.type) {
-			case "text":
-				gaResponse = await greenApiClient.sendMessage(transformedMessage);
-				break;
-			case "url-file":
-				gaResponse = await greenApiClient.sendFileByUrl(transformedMessage);
-				break;
-			default:
-				this.gaLogger.error(`Unsupported Green API message type from GHL transform: ${transformedMessage.type}`);
-				throw new IntegrationError(`Invalid Green API message type: ${transformedMessage.type}`, "INVALID_MESSAGE_TYPE", 500);
+		for (const transformedMessage of transformedMessages) {
+			this.gaLogger.debug(`Green API Message: ${JSON.stringify(transformedMessage)}`);
+			switch (transformedMessage.type) {
+				case "text":
+					gaResponse = await greenApiClient.sendMessage(transformedMessage);
+					break;
+				case "url-file":
+					gaResponse = await greenApiClient.sendFileByUrl(transformedMessage);
+					break;
+				default:
+					this.gaLogger.error(`Unsupported Green API message type from GHL transform: ${transformedMessage.type}`);
+					throw new IntegrationError(`Invalid Green API message type: ${transformedMessage.type}`, "INVALID_MESSAGE_TYPE", 500);
+			}
+			this.trackOutboundMessage(gaResponse.idMessage, locationId, messageId, "delivered");
 		}
-		// The message is already in the GHL conversation (GHL itself put it there), so its
-		// outgoingAPIMessageReceived echo must not be posted again; status notifications for it
-		// are routed to this GHL message.
-		this.trackOutboundMessage(gaResponse.idMessage, locationId, messageId, "delivered");
 		await this.updateGhlMessageStatus(locationId, messageId, "delivered");
-		return gaResponse;
+		return gaResponse!;
 	}
 
 	public async handleGreenApiWebhook(
@@ -978,30 +1036,122 @@ export class GhlService extends BaseAdapter<
 				await this.handleMessageWebhook(webhook, instanceWithUser);
 			} else if (webhook.typeWebhook === "outgoingMessageStatus") {
 				await this.handleOutgoingMessageStatus(webhook);
-			} else if (webhook.typeWebhook === "incomingCall") {
-				const callerPhoneRaw = webhook.from;
-				const normalizedPhone = callerPhoneRaw.split("@")[0];
-				// No name is passed on purpose: a call carries none, and a placeholder would
-				// overwrite the name an existing lead already has in GHL.
-				const ghlContact = await this.findOrCreateGhlContact(
-					instanceWithUser.userId,
-					normalizedPhone,
-					undefined,
-					webhook.instanceData.idInstance.toString(),
-				);
-				if (!ghlContact.id) throw new IntegrationError("Failed to resolve GHL contact for call.", "GHL_API_ERROR");
-
-				const transformedCallMsg = this.ghlTransformer.toPlatformMessage(webhook);
-				transformedCallMsg.contactId = ghlContact.id;
-				transformedCallMsg.locationId = instanceWithUser.userId;
-
-				await this.sendToPlatform(transformedCallMsg, instanceWithUser);
+			} else if (webhook.typeWebhook === "incomingCall" || webhook.typeWebhook === "outgoingCall") {
+				await this.handleCallWebhook(webhook, instanceWithUser);
 			} else {
 				this.gaLogger.warn(`Unhandled allowed Green API webhook type: ${webhookType}`);
 			}
 		} catch (error) {
 			this.gaLogger.error(`Error in handleGreenApiWebhook for instance ${idInstance}, type ${webhookType}: ${error.message}`, error.stack);
-			throw new IntegrationError("Failed to handle Green API webhook", "GA_WEBHOOK_ERROR", 500);
+			throw error;
+		}
+	}
+
+	private requiredWebhookSettings(): Settings {
+		return this.configService.get<string>("GHL_CALL_PROVIDER_ID")
+			? {...REQUIRED_WEBHOOK_SETTINGS, ...CALL_LOG_WEBHOOK_SETTINGS}
+			: {...REQUIRED_WEBHOOK_SETTINGS};
+	}
+
+	private async handleCallWebhook(webhook: CallWebhook, instance: Instance & { user: User }): Promise<void> {
+		const callProviderId = this.configService.get<string>("GHL_CALL_PROVIDER_ID");
+		if (!callProviderId) {
+			if (webhook.typeWebhook === "incomingCall") await this.postCallAsText(webhook, instance);
+			return;
+		}
+		if (!CALL_END_STATUSES.includes(webhook.status)) return;
+
+		const peerPhone = webhook.from.split("@")[0];
+		const contact = await this.findOrCreateGhlContact(
+			instance.userId,
+			peerPhone,
+			undefined,
+			webhook.instanceData.idInstance.toString(),
+		);
+		if (!contact.id) throw new IntegrationError("Failed to resolve GHL contact for call.", "GHL_API_ERROR");
+
+		const isIncoming = webhook.typeWebhook === "incomingCall";
+		const contactPhone = this.formatContactPhone(peerPhone);
+		const instancePhone = this.formatContactPhone((webhook.instanceData.wid || instance.settings?.wid || "").split("@")[0]);
+		const httpClient = await this.getHttpClient(instance.userId);
+		const conversationId = await this.getOrCreateGhlConversation(httpClient, instance.userId, contact.id);
+		const callLog: GhlCallLogRequest = {
+			type: "Call",
+			conversationProviderId: callProviderId,
+			conversationId,
+			altId: webhook.idMessage,
+			date: new Date(webhook.timestamp * 1000).toISOString(),
+			...(isIncoming && {direction: "inbound" as const}),
+			call: {
+				from: isIncoming ? contactPhone : instancePhone,
+				to: isIncoming ? instancePhone : contactPhone,
+				status: this.toGhlCallStatus(webhook),
+			},
+		};
+
+		await httpClient.post(`/conversations/messages/${isIncoming ? "inbound" : "outbound"}`, callLog);
+		this.gaLogger.log(`Logged ${isIncoming ? "incoming" : "outgoing"} call ${webhook.idMessage} as "${callLog.call.status}" for contact ${contact.id} in Location ${instance.userId}`);
+
+		if (callLog.call.status === "completed") {
+			void this.postCallRecordingWhenReady(webhook, instance, contact.id);
+		}
+	}
+
+	private toGhlCallStatus(webhook: CallWebhook): GhlCallStatus {
+		switch (webhook.status) {
+			case "missed":
+				return "no-answer";
+			case "declined":
+				return webhook.typeWebhook === "outgoingCall" ? "busy" : "no-answer";
+			case "invalid":
+				return "failed";
+			default:
+				return (webhook.duration ?? 0) > 0 ? "completed" : "no-answer";
+		}
+	}
+
+	private async postCallAsText(webhook: IncomingCallWebhook, instance: Instance & { user: User }): Promise<void> {
+		const ghlContact = await this.findOrCreateGhlContact(
+			instance.userId,
+			webhook.from.split("@")[0],
+			undefined,
+			webhook.instanceData.idInstance.toString(),
+		);
+		if (!ghlContact.id) throw new IntegrationError("Failed to resolve GHL contact for call.", "GHL_API_ERROR");
+
+		const transformedCallMsg = this.ghlTransformer.toPlatformMessage(webhook);
+		transformedCallMsg.contactId = ghlContact.id;
+		transformedCallMsg.locationId = instance.userId;
+
+		await this.sendToPlatform(transformedCallMsg, instance);
+	}
+
+	private async postCallRecordingWhenReady(webhook: CallWebhook, instance: Instance & { user: User }, contactId: string): Promise<void> {
+		const direction = webhook.typeWebhook === "incomingCall" ? "inbound" : "outbound";
+		try {
+			if (!(await this.callsAvailability.isAvailable(instance))) {
+				this.gaLogger.info(`Skipping the call recording on instance ${instance.idInstance}: calls are not available on its plan`);
+				return;
+			}
+			const client = this.createGreenApiClient(instance);
+			for (let attempt = 0; attempt < CALL_RECORDING_POLL_ATTEMPTS; attempt++) {
+				const recording = await client.getCallRecording({idMessage: webhook.idMessage});
+				if (recording.status === "ready" && recording.downloadUrl) {
+					const {messageId} = await this.postMessageToGhlConversation(
+						instance.userId,
+						contactId,
+						CALL_RECORDING_MESSAGE,
+						[{url: this.recordingLinks.link(instance.idInstance, webhook.idMessage)}],
+						direction,
+					);
+					if (direction === "outbound" && messageId) this.markSelfPosted(messageId);
+					return;
+				}
+				if (recording.status !== "processing") return;
+				await this.delay(CALL_RECORDING_POLL_INTERVAL_MS);
+			}
+		} catch (error) {
+			this.gaLogger.warn(`Could not add the recording of call ${webhook.idMessage} to GHL: ${error.message}`);
 		}
 	}
 
@@ -1036,7 +1186,11 @@ export class GhlService extends BaseAdapter<
 		}
 
 		if (isOutgoing) {
-			if (webhook.typeWebhook === "outgoingAPIMessageReceived" && this.outgoingApiEchoDelayMs > 0) {
+			if (
+				webhook.typeWebhook === "outgoingAPIMessageReceived"
+				&& this.outgoingApiEchoDelayMs > 0
+				&& !this.isOutboundMessageTracked(webhook.idMessage)
+			) {
 				await this.delay(this.outgoingApiEchoDelayMs);
 			}
 			if (this.isOutboundMessageTracked(webhook.idMessage)) {
@@ -1173,6 +1327,46 @@ export class GhlService extends BaseAdapter<
 		return new Promise(resolve => setTimeout(resolve, ms));
 	}
 
+	public async uninstallLocation(locationId: string): Promise<void> {
+		const instances = await this.prisma.getInstancesByUserId(locationId);
+		for (const instance of instances) {
+			await this.detachInstance(instance);
+		}
+		await this.prisma.user.deleteMany({where: {id: locationId}});
+		this.gaLogger.log(`Location ${locationId} uninstalled: ${instances.length} instance(s) detached, tokens removed`);
+	}
+
+	public async detachInstance(instance: Instance): Promise<void> {
+		const integrationWebhookUrl = `${this.configService.get<string>("APP_URL")}/webhooks/green-api`;
+		try {
+			const client = this.createGreenApiClient(instance);
+			const {webhookUrl} = await client.getSettings();
+			if (webhookUrl !== integrationWebhookUrl) return;
+
+			await client.setSettings({webhookUrl: "", webhookUrlToken: ""});
+			this.gaLogger.log(`Instance ${instance.idInstance} no longer sends notifications to the integration`);
+		} catch (error) {
+			this.gaLogger.warn(`Could not reset the webhook URL of instance ${instance.idInstance}: ${error.message}`);
+		}
+	}
+
+	private async isInstanceAuthorized(instance: Instance): Promise<boolean> {
+		if (instance.stateInstance === "authorized") return true;
+
+		try {
+			const {stateInstance} = await this.createGreenApiClient(instance).getStateInstance();
+			if (stateInstance !== instance.stateInstance) {
+				await this.prisma.updateInstanceState(instance.idInstance, stateInstance);
+				instance.stateInstance = stateInstance;
+				this.gaLogger.log(`Instance ${instance.idInstance} state re-checked: ${stateInstance}`);
+			}
+			return stateInstance === "authorized";
+		} catch (error) {
+			this.gaLogger.warn(`Could not re-check the state of instance ${instance.idInstance}: ${error.message}`);
+			return false;
+		}
+	}
+
 	public async handleStateInstanceWebhook(webhook: StateInstanceWebhook): Promise<void> {
 		const idInstance = BigInt(webhook.instanceData.idInstance);
 		this.gaLogger.log(`StateInstanceWebhook for instance ${idInstance}. New state: ${webhook.stateInstance}`);
@@ -1218,7 +1412,7 @@ export class GhlService extends BaseAdapter<
 		const settings: Settings = {
 			webhookUrl: `${appBaseUrl}/webhooks/green-api`,
 			webhookUrlToken: webhookToken,
-			...REQUIRED_WEBHOOK_SETTINGS,
+			...this.requiredWebhookSettings(),
 			wid: waSettings?.phone ? `${waSettings.phone}@c.us` : undefined,
 		};
 
@@ -1239,11 +1433,21 @@ export class GhlService extends BaseAdapter<
 				await greenApiClient.setSettings(settings);
 				this.gaLogger.log(`Applied initial settings to Green API instance ${idInstance}.`);
 			} catch (error) {
-				this.gaLogger.error(`Failed to apply initial settings to Green API instance ${idInstance}: ${error.message}. DB record exists.`);
+				this.gaLogger.error(`Failed to apply initial settings to Green API instance ${idInstance}: ${error.message}. Removing the DB record.`);
+				await this.prisma.removeInstance(BigInt(idInstance));
+				throw new IntegrationError(
+					`Could not set up notifications on the instance: ${error.message}. Please try again.`,
+					"INSTANCE_SETTINGS_ERROR",
+					502,
+				);
 			}
 			return dbInstance;
 		} catch (error) {
 			this.gaLogger.error(`Failed to create Green API instance ${idInstance} for User ${ghlUserId}: ${error.message}`, error.stack);
+			if (error instanceof IntegrationError) throw error;
+			if (error?.code === "P2002" || String(error?.message).includes("already exists")) {
+				throw new IntegrationError("Instance ID already exists", "INSTANCE_EXISTS", 409);
+			}
 			throw new IntegrationError("Failed to create instance", "INSTANCE_CREATION_ERROR", 500);
 		}
 	}
@@ -1273,7 +1477,7 @@ export class GhlService extends BaseAdapter<
 			});
 			throw new BadRequestException(`Instance ${data.instanceId} does not belong to location ${locationId}`);
 		}
-		if (instance.stateInstance !== "authorized") {
+		if (!await this.isInstanceAuthorized(instance)) {
 			this.gaLogger.error(`Instance ${data.instanceId} is not authorized (state: ${instance.stateInstance})`, {
 				data,
 				locationId,
@@ -1282,8 +1486,9 @@ export class GhlService extends BaseAdapter<
 			throw new BadRequestException(`Instance ${data.instanceId} is not authorized (state: ${instance.stateInstance})`);
 		}
 
-		const chatId = formatPhoneNumber(contactPhone);
-		const cleanPhone = chatId.replace("@c.us", "");
+		const isGroup = contactPhone.replace(/\D/g, "").length > MAX_PHONE_DIGITS;
+		const chatId = formatPhoneNumber(contactPhone, isGroup ? "group" : "private");
+		const cleanPhone = chatId.replace(/@[cg]\.us$/, "");
 		const greenApiClient = this.createGreenApiClient(instance);
 
 		// Resolved before the message is sent: with no contact the message id must not be reserved,
@@ -1406,6 +1611,50 @@ export class GhlService extends BaseAdapter<
 			messageId: sendResponse.idMessage,
 			contactId: ghlContact.id,
 		};
+	}
+
+	public async startWorkflowCall(locationId: string, contactPhone: string, data: WorkflowActionData): Promise<WorkflowCallResult> {
+		const instance = await this.prisma.getInstance(BigInt(data.instanceId));
+		if (!instance || instance.userId !== locationId) {
+			throw new BadRequestException(`Instance ${data.instanceId} does not belong to location ${locationId}`);
+		}
+		if (!await this.isInstanceAuthorized(instance)) {
+			throw new BadRequestException(`Instance ${data.instanceId} is not authorized (state: ${instance.stateInstance})`);
+		}
+		if (contactPhone.replace(/\D/g, "").length > MAX_PHONE_DIGITS) {
+			throw new BadRequestException("Calls work only with personal chats");
+		}
+		const audioUrl = String(data.audioUrl ?? "");
+		if (!/^https?:\/\//i.test(audioUrl)) {
+			throw new BadRequestException("audioUrl must be an http or https link");
+		}
+
+		const voice = new CallVoice(this.createGreenApiClient(instance), {
+			ffmpegPath: this.configService.get<string>("FFMPEG_PATH") || undefined,
+		});
+		try {
+			await voice.open();
+			const callId = await voice.dial(formatPhoneNumber(contactPhone));
+			this.gaLogger.info(`Workflow call ${callId} started from instance ${data.instanceId} in Location ${locationId}`);
+			void this.playWhenAnswered(voice, callId, audioUrl);
+			return {success: true, callId};
+		} catch (error) {
+			voice.close();
+			throw error;
+		}
+	}
+
+	private async playWhenAnswered(voice: CallVoice, callId: string, audioUrl: string): Promise<void> {
+		try {
+			await voice.waitFor("on-call");
+			await voice.play(audioUrl);
+			await voice.hangUp();
+			this.gaLogger.info(`Workflow call ${callId} played its audio and hung up`);
+		} catch (error) {
+			this.gaLogger.info(`Workflow call ${callId} ended without the full audio: ${error.message}`);
+		} finally {
+			voice.close();
+		}
 	}
 
 	private buildInteractiveButtons(data: WorkflowActionData): Array<{
