@@ -10,6 +10,8 @@ export const GREEN_API_WEBHOOK_MAX_ATTEMPTS = 5;
 
 export const MAX_PHONE_DIGITS = 15;
 
+export const GROUP_ID_TAG_PREFIX = "whatsapp-group-id-";
+
 export const CALLS_PHONE_PATH = "/calls-phone";
 
 export const CALLS_PHONE_CLIENT_PREFIX = "/app/calls-phone/";

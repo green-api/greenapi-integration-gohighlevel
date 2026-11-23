@@ -37,6 +37,7 @@ import {
 	CALL_RECORDING_POLL_ATTEMPTS,
 	CALL_RECORDING_POLL_INTERVAL_MS,
 	GHL_TOKEN_REFRESH_MARGIN_MS,
+	GROUP_ID_TAG_PREFIX,
 	MAX_PHONE_DIGITS,
 } from "../constants";
 
@@ -550,11 +551,29 @@ export class GhlService extends BaseAdapter<
 	}
 
 	/** The only tags the integration owns; every other tag on a contact belongs to the GHL user. */
-	private buildIntegrationTags(instanceId?: string, isGroup?: boolean): string[] {
+	private buildIntegrationTags(instanceId?: string, isGroup?: boolean, groupId?: string): string[] {
 		const tags: string[] = [];
 		if (instanceId) tags.push(`${INSTANCE_TAG_PREFIX}${instanceId}`);
 		if (isGroup) tags.push(GROUP_TAG);
+		if (isGroup && groupId) tags.push(`${GROUP_ID_TAG_PREFIX}${groupId}`);
 		return tags;
+	}
+
+	public groupChatIdFromTags(tags?: string[]): string | null {
+		const groupIds = new Set(
+			(tags || [])
+				.map(tag => tag.trim().toLowerCase())
+				.filter(tag => tag.startsWith(GROUP_ID_TAG_PREFIX))
+				.map(tag => tag.slice(GROUP_ID_TAG_PREFIX.length))
+				.filter(groupId => /^\d+$/.test(groupId)),
+		);
+		if (groupIds.size !== 1) {
+			if (groupIds.size > 1) {
+				this.gaLogger.warn(`Contact carries several group id tags (${[...groupIds].join(", ")}), falling back to its phone`);
+			}
+			return null;
+		}
+		return `${[...groupIds][0]}@g.us`;
 	}
 
 	/**
@@ -655,7 +674,7 @@ export class GhlService extends BaseAdapter<
 	): Promise<GhlContact> {
 		const formattedPhone = this.formatContactPhone(phone);
 		const subject = isGroup ? "group" : "phone";
-		const requiredTags = this.buildIntegrationTags(instanceId, isGroup);
+		const requiredTags = this.buildIntegrationTags(instanceId, isGroup, isGroup ? phone.replace(/\D/g, "") : undefined);
 		const newContactName = this.buildNewContactName(phone, name, isGroup);
 
 		const lookup = await this.lookupGhlContactByPhone(ghlUserId, phone);
@@ -968,6 +987,7 @@ export class GhlService extends BaseAdapter<
 	public async handlePlatformWebhook(
 		ghlWebhook: GhlWebhookDto,
 		idInstance: number | bigint,
+		chatId?: string,
 	): Promise<SendResponse> {
 		const locationId = ghlWebhook.locationId;
 		const messageId = ghlWebhook.messageId;
@@ -987,7 +1007,7 @@ export class GhlService extends BaseAdapter<
 		if (!await this.isInstanceAuthorized(instance)) throw new IntegrationError("Instance is not authorized", "INSTANCE_NOT_AUTHORIZED", 400);
 
 		const greenApiClient = this.createGreenApiClient(instance);
-		const transformedMessages = this.ghlTransformer.toGreenApiMessages(ghlWebhook);
+		const transformedMessages = this.ghlTransformer.toGreenApiMessages(ghlWebhook, chatId);
 
 		this.gaLogger.log(`Transformed GHL message to ${transformedMessages.length} Green API message(s) for instance ${idInstance}`);
 
@@ -1457,6 +1477,7 @@ export class GhlService extends BaseAdapter<
 		contactPhone: string,
 		data: WorkflowActionData,
 		actionType: "message" | "file" | "interactive-buttons" | "reply-buttons",
+		contactId?: string,
 	): Promise<WorkflowActionResult> {
 		this.gaLogger.info(`Processing ${actionType} workflow action for location ${locationId}`, {
 			actionType,
@@ -1486,15 +1507,17 @@ export class GhlService extends BaseAdapter<
 			throw new BadRequestException(`Instance ${data.instanceId} is not authorized (state: ${instance.stateInstance})`);
 		}
 
+		const contactById = contactId ? await this.getGhlContactById(locationId, contactId) : null;
 		const isGroup = contactPhone.replace(/\D/g, "").length > MAX_PHONE_DIGITS;
-		const chatId = formatPhoneNumber(contactPhone, isGroup ? "group" : "private");
+		const chatId = this.groupChatIdFromTags(contactById?.tags)
+			?? formatPhoneNumber(contactPhone, isGroup ? "group" : "private");
 		const cleanPhone = chatId.replace(/@[cg]\.us$/, "");
 		const greenApiClient = this.createGreenApiClient(instance);
 
 		// Resolved before the message is sent: with no contact the message id must not be reserved,
 		// otherwise the outgoingAPIMessageReceived echo - by then the only way into the GHL
 		// conversation - would dismiss the message as one that is already there.
-		const ghlContact = await this.getGhlContact(locationId, cleanPhone);
+		const ghlContact = contactById ?? await this.getGhlContact(locationId, cleanPhone);
 
 		let sendResponse: SendResponse;
 		let ghlMessageContent: string;

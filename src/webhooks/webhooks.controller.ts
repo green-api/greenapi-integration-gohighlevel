@@ -126,6 +126,7 @@ export class WebhooksController {
 				contactPhone,
 				workflowAction.data,
 				actionType,
+				workflowAction.extras?.contactId,
 			);
 
 			res.status(HttpStatus.OK).json(result);
@@ -229,8 +230,9 @@ export class WebhooksController {
 				}
 			}
 
+			const groupChatId = this.ghlService.groupChatIdFromTags(contact?.tags);
 			res.status(HttpStatus.OK).send();
-			await this.ghlService.handlePlatformWebhook(ghlWebhook, BigInt(instanceId));
+			await this.ghlService.handlePlatformWebhook(ghlWebhook, BigInt(instanceId), groupChatId ?? undefined);
 		} catch (error) {
 			this.logger.error(`Error processing GHL webhook for location ${locationId}`, error);
 			if (locationId && messageId) {

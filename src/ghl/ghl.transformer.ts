@@ -292,12 +292,12 @@ export class GhlTransformer
 		return this.toGreenApiMessages(ghlWebhook)[0];
 	}
 
-	toGreenApiMessages(ghlWebhook: GhlWebhookDto): Message[] {
+	toGreenApiMessages(ghlWebhook: GhlWebhookDto, chatIdOverride?: string): Message[] {
 		this.logger.debug(`Transforming GHL Webhook to Green API Message: ${JSON.stringify(ghlWebhook)}`);
 
 		if (ghlWebhook.type === "SMS" && ghlWebhook.phone) {
 			const isGroupChatId = ghlWebhook.phone.length > 16;
-			const chatId = formatPhoneNumber(ghlWebhook.phone, isGroupChatId ? "group" : "private");
+			const chatId = chatIdOverride || formatPhoneNumber(ghlWebhook.phone, isGroupChatId ? "group" : "private");
 
 			if (ghlWebhook.attachments && ghlWebhook.attachments.length > 0) {
 				this.logger.debug(`GHL webhook has ${ghlWebhook.attachments.length} attachment(s). Processing as url-file.`);

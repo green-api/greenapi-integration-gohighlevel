@@ -317,6 +317,8 @@ instance they contact, will appear in a **single conversation thread**.
 - Contact name starting with `[Group]`
 - Phone field containing a long numeric ID instead of a traditional phone number
 - `whatsapp-group` tag automatically applied to group contacts
+- `whatsapp-group-id-<ID>` tag with the exact WhatsApp group ID. Replies to the group use it, because GHL rounds the
+  long ID in the phone field
 
 ## Calls
 
