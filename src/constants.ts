@@ -42,6 +42,8 @@ export const CALL_RECORDING_LINK_KEY_LABEL = "green-api-call-recording-links";
 
 export const CALL_RECORDING_REDIRECT_CACHE_MS = 45 * 60 * 1000;
 
+export const CALL_RECORDING_RESOURCE_POLICY = "cross-origin";
+
 export const GHL_TOKEN_REFRESH_MARGIN_MS = 5 * 60 * 1000;
 
 export const PRISMA_TRANSIENT_ERROR_CODES = ["P1001", "P1002", "P1008", "P1017", "P2024"];

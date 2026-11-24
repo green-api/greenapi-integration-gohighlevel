@@ -6,6 +6,7 @@ import { CallRecordingLinksService } from "./call-recording-links.service";
 import {
 	CALL_RECORDING_FILE_EXTENSION,
 	CALL_RECORDING_REDIRECT_CACHE_MS,
+	CALL_RECORDING_RESOURCE_POLICY,
 	CALL_RECORDING_SIGNATURE_PARAM,
 	CALL_RECORDINGS_PATH,
 } from "../constants";
@@ -27,6 +28,7 @@ export class CallRecordingsController {
 		@Query(CALL_RECORDING_SIGNATURE_PARAM) signature: unknown,
 		@Res() res: Response,
 	): Promise<void> {
+		res.setHeader("Cross-Origin-Resource-Policy", CALL_RECORDING_RESOURCE_POLICY);
 		const callId = file.endsWith(CALL_RECORDING_FILE_EXTENSION) ? file.slice(0, -CALL_RECORDING_FILE_EXTENSION.length) : "";
 		if (!/^\d+$/.test(idInstance) || !callId || !this.links.verify(idInstance, callId, signature)) {
 			res.status(HttpStatus.NOT_FOUND).end();
